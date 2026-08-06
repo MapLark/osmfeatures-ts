@@ -22,21 +22,27 @@ export type OSMFeaturesMeta = {
 };
 
 /** Wire GeoJSON FeatureCollection (no pagination fields). */
-export type OSMFeaturesPayload = {
+export type OSMGeoJSONPayload = {
   type: 'FeatureCollection';
   features: unknown[];
 };
 
-/** SDK page: GeoJSON body + header-derived meta (separate objects). */
+/** GeoJSON page: FeatureCollection body + header-derived meta. */
+export type OSMGeoJSONResult = {
+  data: OSMGeoJSONPayload;
+  meta: OSMFeaturesMeta;
+};
+
+/** Any Accept: GeoJSON page, or raw bytes in ``data`` for binary encodings. */
 export type OSMFeaturesResult = {
-  data: OSMFeaturesPayload;
+  data: OSMGeoJSONPayload | ArrayBuffer;
   meta: OSMFeaturesMeta;
 };
 
 function resultFromFeatures(
   features: unknown[],
   meta: OSMFeaturesMeta,
-): OSMFeaturesResult {
+): OSMGeoJSONResult {
   return {
     data: { type: 'FeatureCollection', features },
     meta,
@@ -83,7 +89,7 @@ export type OSMFeaturesParams = OSMFeaturesLayer & {
   maxAreaM2?: number;
   disableBudgetWarning?: boolean;
   centroid?: boolean;
-  /** Accept media type. Default application/geo+json; other types return ArrayBuffer. */
+  /** Accept media type. Default application/geo+json; other types put bytes in ``data``. */
   accept?: string;
 };
 
@@ -430,7 +436,7 @@ export class OSMFeatures {
     fetchFn: typeof fetch,
     sleepFn: (ms: number) => Promise<void>,
     nowFn: () => number,
-  ): Promise<OSMFeaturesResult | ArrayBuffer> {
+  ): Promise<OSMFeaturesResult> {
     const query = buildFeaturesQuery(params);
     const upstreamUrl = new URL(`${this.apiBaseUrl}/v2/osm_features`);
     for (const [key, value] of query.entries()) {
@@ -494,14 +500,19 @@ export class OSMFeatures {
     }
 
     if (isGeojsonAccept(params.accept)) {
-      const body = (await upstream.json()) as OSMFeaturesPayload;
+      const body = (await upstream.json()) as OSMGeoJSONPayload;
       const features = Array.isArray(body.features) ? body.features : [];
       return resultFromFeatures(
         features,
         metaFromHeaders(upstream.headers, features.length),
       );
     }
-    return upstream.arrayBuffer();
+
+    const bytes = await upstream.arrayBuffer();
+    return {
+      data: bytes,
+      meta: metaFromHeaders(upstream.headers, 0),
+    };
   }
 
   /** Single upstream page. Params map 1:1 to server query string (no tiling). */
@@ -527,7 +538,7 @@ export class OSMFeatures {
       accept,
     }: OSMFeaturesParams,
     dependencies: OSMFeaturesDependencies = {},
-  ): Promise<OSMFeaturesResult | ArrayBuffer> {
+  ): Promise<OSMFeaturesResult> {
     const payload = await this._rawQuery(
       {
         bbox,
@@ -574,6 +585,7 @@ export class OSMFeatures {
       maxAreaM2,
       disableBudgetWarning,
       centroid,
+      accept,
       limitPerPage = DEFAULT_LIMIT,
       bboxTiles = 2,
       maxPages = 15,
@@ -587,7 +599,14 @@ export class OSMFeatures {
       maxFeatures?: number | null;
     },
     dependencies: OSMFeaturesDependencies = {},
-  ): Promise<OSMFeaturesResult> {
+  ): Promise<OSMGeoJSONResult> {
+    if (!isGeojsonAccept(accept)) {
+      throw appError(
+        400,
+        'invalid_accept',
+        'query_all only supports GeoJSON; use query({ accept }) for binary encodings.',
+      );
+    }
     if (!isPowerOfTwo(bboxTiles)) {
       throw appError(
         400,
@@ -604,7 +623,7 @@ export class OSMFeatures {
     const tileBboxes = splitBbox(bbox, bboxTiles);
     const allFeatures: unknown[] = [];
     let pageCount = 0;
-    let lastPage: OSMFeaturesResult | null = null;
+    let lastPage: OSMGeoJSONResult | null = null;
     let relayPartialReason: string | null = null;
     let lastCursor: string | null = null;
     let unitsCharged = 0;
@@ -644,7 +663,7 @@ export class OSMFeatures {
       let tileExhausted = false;
 
       while (tilePages < maxPages && allFeatures.length < featureCap) {
-        let page: OSMFeaturesResult;
+        let page: OSMGeoJSONResult;
         try {
           const raw = await this._rawQuery(
             { ...baseParams, bbox: tileBbox, cursor },
@@ -652,14 +671,14 @@ export class OSMFeatures {
             sleepFn,
             nowFn,
           );
-          if (raw instanceof ArrayBuffer) {
+          if (raw.data instanceof ArrayBuffer) {
             throw appError(
               400,
               'invalid_accept',
               'query_all only supports GeoJSON; use query({ accept }) for binary encodings.',
             );
           }
-          page = raw;
+          page = { data: raw.data, meta: raw.meta };
         } catch (error) {
           const status = (error as AppError).status;
           if (pageCount > 0 && (status === 400 || status === 429)) {
@@ -671,7 +690,9 @@ export class OSMFeatures {
           throw error;
         }
 
-        const pageFeatures = Array.isArray(page.data.features) ? page.data.features : [];
+        const pageFeatures = Array.isArray(page.data.features)
+          ? page.data.features
+          : [];
         allFeatures.push(...pageFeatures);
         lastPage = page;
         pageCount += 1;

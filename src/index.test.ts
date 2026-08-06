@@ -4,7 +4,7 @@ import {
   resolveBboxTiles,
   splitBbox,
   type OSMFeaturesLayer,
-  type OSMFeaturesPayload,
+  type OSMGeoJSONPayload,
 } from './index.js';
 
 type AppError = Error & {
@@ -44,7 +44,7 @@ function feature(id: string): unknown {
   };
 }
 
-function jsonResponse(payload: OSMFeaturesPayload, init: { status?: number; headers?: HeadersInit } = {}): Response {
+function jsonResponse(payload: OSMGeoJSONPayload, init: { status?: number; headers?: HeadersInit } = {}): Response {
   return new Response(JSON.stringify(payload), {
     status: init.status ?? 200,
     headers: {
@@ -241,7 +241,7 @@ async function main(): Promise<void> {
   const billed = await osmFeatures.query({ ...buildingsLayer, limit: 1 }, {
     fetchFn: async () => geojsonPage([feature('billed')], false, null, 42),
   });
-  assert.ok(!(billed instanceof ArrayBuffer));
+  assert.ok(!(billed.data instanceof ArrayBuffer));
   assert.equal(billed.meta.units_charged, 42);
 
   const retrySleeps: number[] = [];
@@ -400,6 +400,48 @@ async function main(): Promise<void> {
   });
   assert.deepEqual(dupCap.data.features, [feature('dup')]);
   assert.equal(dupCap.meta.has_more, false);
+
+  // Binary Accept: query returns { data: ArrayBuffer, meta } and forwards Accept.
+  let binaryAcceptHeader: string | null = null;
+  const fgbBytes = new Uint8Array([0x66, 0x67, 0x62, 0x01]).buffer;
+  const binary = await osmFeatures.query(
+    { ...buildingsLayer, accept: 'application/flatgeobuf' },
+    {
+      fetchFn: async (_input, init) => {
+        binaryAcceptHeader = new Headers(init?.headers).get('Accept');
+        return new Response(fgbBytes.slice(0), {
+          status: 200,
+          headers: {
+            'content-type': 'application/flatgeobuf',
+            ...paginationHeaders(2, true, 'Y3Vyc29y'),
+            'X-Usage-Units-Charged': '7',
+          },
+        });
+      },
+    },
+  );
+  assert.equal(binaryAcceptHeader, 'application/flatgeobuf');
+  assert.ok(binary.data instanceof ArrayBuffer);
+  assert.deepEqual(new Uint8Array(binary.data), new Uint8Array([0x66, 0x67, 0x62, 0x01]));
+  assert.equal(binary.meta.returned, 2);
+  assert.equal(binary.meta.has_more, true);
+  assert.equal(binary.meta.next_cursor, 'Y3Vyc29y');
+  assert.equal(binary.meta.units_charged, 7);
+
+  // query_all refuses non-GeoJSON Accept up front.
+  await assert.rejects(
+    async () => osmFeatures.query_all({
+      ...buildingsLayer,
+      bboxTiles: 1,
+      accept: 'application/flatgeobuf',
+    }),
+    (error: unknown) => {
+      const appError = error as AppError;
+      assert.equal(appError.status, 400);
+      assert.equal(appError.code, 'invalid_accept');
+      return true;
+    },
+  );
 
   console.log('osmfeatures checks passed');
 }

@@ -52,12 +52,13 @@ console.log(page.data.features.length);
 // Header-derived meta (not part of GeoJSON): paging + usage.
 console.log(page.meta.has_more, page.meta.next_cursor, page.meta.units_charged);
 
-// Binary / table encodings via Accept
-const buf = await client.query({
+// Binary / table encodings via Accept — same { data, meta } shape.
+const fgb = await client.query({
   bbox: '18.06,59.32,18.09,59.34',
   tags: ['building'],
   accept: 'application/flatgeobuf',
-}); // ArrayBuffer
+});
+console.log(fgb.data instanceof ArrayBuffer, fgb.meta.has_more, fgb.meta.next_cursor);
 ```
 
 Talks to `https://api.maplark.com` by default.
