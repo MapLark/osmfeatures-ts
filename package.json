@@ -1,0 +1,54 @@
+{
+  "name": "osmfeatures",
+  "version": "0.1.0",
+  "description": "Official client for the MapLark OSM Features API (GeoJSON, FlatGeobuf, GeoParquet, CSV)",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "tsx src/index.test.ts && tsx src/geojson-feature.test.ts && tsx src/preset/preset.test.ts",
+    "prepare": "npm run build",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "openstreetmap",
+    "osm",
+    "geojson",
+    "flatgeobuf",
+    "geoparquet",
+    "overpass",
+    "maplark",
+    "geospatial",
+    "maps"
+  ],
+  "homepage": "https://maplark.com",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/MapLark/osmfeatures-typescript.git"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "http-errors": "^2.0.0"
+  },
+  "devDependencies": {
+    "@types/http-errors": "^2.0.5",
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}
