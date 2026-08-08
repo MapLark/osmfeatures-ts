@@ -1,7 +1,7 @@
 {
   "name": "osmfeatures",
   "version": "0.1.0",
-  "description": "Official client for the MapLark OSM Features API (GeoJSON, FlatGeobuf, GeoParquet, CSV)",
+  "description": "Get OpenStreetMap features from dedicated servers with a single API call in GeoJSON and other formats.",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
