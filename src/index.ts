@@ -89,6 +89,8 @@ export type OSMFeaturesParams = OSMFeaturesLayer & {
   maxAreaM2?: number;
   disableBudgetWarning?: boolean;
   centroid?: boolean;
+  /** When true (default), clip returned geometry to the requested bbox. */
+  clipGeometry?: boolean;
   /** Accept media type. Default application/geo+json; other types put bytes in ``data``. */
   accept?: string;
 };
@@ -259,6 +261,7 @@ type RawQueryParams = {
   maxAreaM2?: number;
   disableBudgetWarning?: boolean;
   centroid?: boolean;
+  clipGeometry?: boolean;
   accept?: string;
   type?: string;
   shape?: string;
@@ -300,6 +303,9 @@ function buildFeaturesQuery(params: RawQueryParams): URLSearchParams {
   }
   if (params.centroid != null) {
     query.set('centroid', String(params.centroid));
+  }
+  if (params.clipGeometry != null) {
+    query.set('clipGeometry', String(params.clipGeometry));
   }
   if (params.type) {
     query.set('type', params.type);
@@ -415,6 +421,7 @@ export class OSMFeatures {
       maxAreaM2: optionalNumber(query, 'max_area_m2'),
       disableBudgetWarning: optionalBoolean(query, 'disable_budget_warning'),
       centroid: optionalBoolean(query, 'centroid'),
+      clipGeometry: optionalBoolean(query, 'clipGeometry'),
     };
   }
 
@@ -535,6 +542,7 @@ export class OSMFeatures {
       maxAreaM2,
       disableBudgetWarning,
       centroid,
+      clipGeometry,
       accept,
     }: OSMFeaturesParams,
     dependencies: OSMFeaturesDependencies = {},
@@ -558,6 +566,7 @@ export class OSMFeatures {
         maxAreaM2,
         disableBudgetWarning,
         centroid,
+        clipGeometry,
         accept,
       },
       dependencies.fetchFn ?? fetch,
@@ -585,6 +594,7 @@ export class OSMFeatures {
       maxAreaM2,
       disableBudgetWarning,
       centroid,
+      clipGeometry,
       accept,
       limitPerPage = DEFAULT_LIMIT,
       bboxTiles = 2,
@@ -647,6 +657,7 @@ export class OSMFeatures {
       maxAreaM2,
       disableBudgetWarning,
       centroid,
+      clipGeometry,
     };
 
     for (const tileBbox of tileBboxes) {

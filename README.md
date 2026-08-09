@@ -103,6 +103,7 @@ Geometric filters such specific OSM element type, min length, or including centr
 | `type`       | `string`               | all     | OSM element types, e.g. `node`, `way`, `relation`, or comma-separated (`way,relation`). |
 | `shape`      | `line | polygon | all` | `all`   | Geometry shape filter for ways and relations.                                           |
 | `centroid`   | `boolean`              | `false` | When `true`, include a centroid on non-point features.                                  |
+| `clipGeometry` | `boolean`            | `true`  | When `true`, clip returned geometry to the requested `bbox`. Set `false` for full geometry. |
 | `minLengthM` | `number`               |         | Minimum length in metres (lines).                                                       |
 | `maxLengthM` | `number`               |         | Maximum length in metres (lines).                                                       |
 | `minAreaM2`  | `number`               |         | Minimum area in square metres (polygons).                                               |
@@ -166,7 +167,7 @@ console.log(all.meta.page_count, all.meta.has_more, all.meta.units_charged);
 
 ### Params
 
-Same filter params as `query` (`bbox`, `tags`, `orTags`, `notTags`, `type`, `shape`, `zoom`, `around`, `osmIds`, `minLengthM`, `maxLengthM`, `minAreaM2`, `maxAreaM2`, `centroid`, `disableBudgetWarning`), plus:
+Same filter params as `query` (`bbox`, `tags`, `orTags`, `notTags`, `type`, `shape`, `zoom`, `around`, `osmIds`, `minLengthM`, `maxLengthM`, `minAreaM2`, `maxAreaM2`, `centroid`, `clipGeometry`, `disableBudgetWarning`), plus:
 
 
 | Param          | Type            | Default                | Description                                                                                                                                               |
