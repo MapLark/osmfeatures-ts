@@ -1,6 +1,6 @@
 {
   "name": "osmfeatures",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "Get OpenStreetMap features from dedicated servers with a single API call in GeoJSON and other formats.",
   "type": "module",
   "main": "./dist/index.js",

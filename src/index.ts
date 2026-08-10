@@ -499,6 +499,10 @@ export class OSMFeatures {
             }
           }
         }
+        // ponytail: simple stderr-visible warning for 429 retries; upgrade to injected logger if consumers need structured logs.
+        console.warn(
+          `[osmfeatures] Upstream returned 429; retry ${retryAttempt}/${this.retryAttempts} in ${Math.round(waitMs)}ms.`,
+        );
         await sleepFn(waitMs);
         continue;
       }
