@@ -2,7 +2,7 @@
 
 Official client for the [MapLark OSM Features API](https://maplark.com) to get GeoJSON, FlatGeobuf, GeoParquet, or CSV from OpenStreetMap. The API gets data from dedicated postgis OSM servers separate from public Overpass.
 
-Query OpenStreetMap features such as buildings, streets, and POIs easily. Search for OSM features by bounding box, tags, and geometry shape and get GeoJSON back within less than 250ms (dependent on query size). No converting between formats manually. The API keeps OSM semantics intact, like tags and ways, and returns OSM features you can feed straight into Leaflet, MapLibre, OpenLayers, or any geospatial toolchain. It is backed by postgis with tiered API keys and rate limiting to keep noisy neighbours out to give you low, predictable latency for real traffic. It also has self-host path for those willing to host complex infrastructure themselves.
+Query OpenStreetMap features such as buildings, streets, and POIs easily. Search for OSM features by bounding box, tags, and geometry shape and get GeoJSON back within less than 250ms (dependent on query size). No converting between formats manually. The API keeps OSM semantics intact, like tags and ways, and returns OSM features you can feed straight into Leaflet, MapLibre, OpenLayers, or any geospatial toolchain. It is backed by postgis with tiered API keys and rate limiting to keep noisy neighbours out to give you low, predictable latency for real traffic. It also has a self-host path for those willing to host complex infrastructure themselves, and Geo Agent methods for places search, opening hours, and walk or bike routing.
 
 The translation layer is very simple:
 
@@ -221,9 +221,37 @@ const usage = await client.usage();
 console.log(usage.tier, usage.usage_this_month, usage.remaining_this_month);
 ```
 
-## `places_search` / `places_nearby` / `places_details`
+## Geo Agent (places and routes)
 
-Place discovery and lookup. Search is a bbox or `location`+`radius`. Nearby ranks one set from a point. Details refetches a search/nearby feature id (`node/123`). Search and nearby hours use each place's local timezone; optional `asOf` pins the evaluation instant.
+`query()` is the generic OpenStreetMap layer: buildings, roads, park polygons, any tag and geometry shape. Geo Agent is the place and mobility layer on top of the same OSM data. You pick OSM tags (`amenity=cafe`), an area, a time, and walk or bike. The API returns coordinates, opening-hours status, nearest-first ranks, and walk or bike geometry.
+
+These endpoints answer questions like "cafes near me", "bars open at 20:00", or "suggest a walking bar crawl in Stockholm". An AI agent or a script can call the same methods.
+
+| Endpoint | HTTP | What it does |
+| -------- | ---- | ------------ |
+| `places_search` | `POST /v1/places/search` | Find places in a bounding box **or** a `location` plus `radius`. Filter with OSM tags. Optional `openNow` / `asOf` for opening hours. |
+| `places_nearby` | `POST /v1/places/nearby` | "X near this point". Same tags and hours filters, ranked nearest-first by straight-line distance. |
+| `places_details` | `GET /v1/places/{osm_type}/{osm_id}` | Reload one place by the id search or nearby returned (`node/123`). |
+| `routes_isochrone` | `POST /v1/routes/isochrone` | Walk or bike reach polygon from an origin (how far you can get in N metres or seconds). |
+| `routes_path` | `POST /v1/routes/path` | Walk or bike through stops in the order you list them. No reordering. |
+| `routes_optimized_path` | `POST /v1/routes/optimized_path` | Order the stops for you (a tour from `start`). `loop` (default true) returns to start. |
+
+Search and nearby hours use each place's local timezone. Optional `asOf` pins the evaluation instant. Routing is walk or bicycle on the OSM network (`travelMode`: `WALK` or `BICYCLE`). Car routing is not available yet.
+
+#### Typical questions
+
+| Prompt | SDK |
+|------|-----|
+| "Cafes near me" | `client.places_nearby()` or `client.places_search()` with `location` + `radius` |
+| "Restaurants within 150 m of a station" | two `client.places_search()` calls, then join locally by distance |
+| "Bars open at 20:00" | `client.places_search()` with `asOf`, keep `openingHours.status == "open"` |
+| "Cafes within a 10-minute bike ride" | `client.routes_isochrone()` + `client.places_search()` in a covering radius + keep points inside the polygon |
+| "A walking bar crawl in Stockholm" | `client.places_search()` + `client.routes_optimized_path()` (`loop: true`) |
+| "Walk from my hotel to the cafe, then the office" | `client.routes_path()` with those stops in listed order |
+| "Suggest a walk to a bar, a restaurant, and a cafe, no particular order" | `client.routes_optimized_path()` with `loop: false` |
+| "Is the office a 20-minute walk from the apartment?" | `client.routes_isochrone()` from A, point-in-polygon for B |
+
+### Examples for `places_search` / `places_nearby` / `places_details`
 
 ```ts
 const origin = { lat: 59.316, lon: 18.075 };
@@ -250,9 +278,9 @@ const details = await client.places_details({ osmType: first.id });
 
 `places_details` also accepts `{ osmType: 'node', osmId: 123 }`. Hours are annotated at request time in the place's local timezone.
 
-## `routes_isochrone` / `routes_path` / `routes_optimized_path`
+### Examples for `routes_isochrone` / `routes_path` / `routes_optimized_path`
 
-Walk or bicycle routing via `POST /v1/routes/*`. Points accept `lon` or `lng`.
+Points accept `lon` or `lng`. `routes_isochrone` takes exactly one of `maxDistanceM` or `durationS`. Optional `searchBufferM` widens the highway fetch corridor.
 
 ```ts
 const origin = { lon: 18.075, lat: 59.316 };
@@ -272,7 +300,5 @@ const tour = await client.routes_optimized_path({
   stops: [cafe],
 });
 ```
-
-`routes_isochrone` takes exactly one of `maxDistanceM` or `durationS`. `routes_path` follows `stops` in listed order (no TSP). `routes_optimized_path` orders `stops` from `start`; `loop` (default true) returns to start. Optional `searchBufferM` and `travelMode` (`WALK` or `BICYCLE`).
 
 Read the full API reference here [https://maplark.com/developer](https://maplark.com/developer) such as the OpenAPI 2.0 HTTP docs.
