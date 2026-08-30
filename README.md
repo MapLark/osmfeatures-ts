@@ -73,7 +73,8 @@ The geographical area for the request in terms of GPS coordinates or specific OS
 | Param    | Type     | Description                                        |
 | -------- | -------- | -------------------------------------------------- |
 | `bbox`   | `string` | Bounding box as `min_lon,min_lat,max_lon,max_lat`. |
-| `around` | `string` | Circle filter as `lon,lat,radius_m`.               |
+| `location` | `string` | Point for a radius search as `lat,lng`. Requires `radius`. |
+| `radius` | `number` | Search radius in metres. Requires `location`. |
 | `osmIds` | `string` | Comma-separated OSM IDs to fetch by id.            |
 
 
@@ -167,7 +168,7 @@ console.log(all.meta.page_count, all.meta.has_more, all.meta.units_charged);
 
 ### Params
 
-Same filter params as `query` (`bbox`, `tags`, `orTags`, `notTags`, `type`, `shape`, `zoom`, `around`, `osmIds`, `minLengthM`, `maxLengthM`, `minAreaM2`, `maxAreaM2`, `centroid`, `clipGeometry`, `disableBudgetWarning`), plus:
+Same filter params as `query` (`bbox`, `tags`, `orTags`, `notTags`, `type`, `shape`, `zoom`, `location`, `radius`, `osmIds`, `minLengthM`, `maxLengthM`, `minAreaM2`, `maxAreaM2`, `centroid`, `clipGeometry`, `disableBudgetWarning`), plus:
 
 
 | Param          | Type            | Default                | Description                                                                                                                                               |
@@ -198,5 +199,80 @@ Same fields as `query`, plus:
 
 Also exports layer presets (`resolveLayerFromQuery`, `OSM_FEATURES_LAYER_PRESETS`, ...)
 and GeoJSON payload helpers (`featureCentroid`, `geometryBounds`, `parseFeatureId`, ...).
+
+## `estimate_cost`
+
+Preflight credit cost via `GET /v2/osm_features/cost`. Same filter params as `query`. No OSM data is fetched.
+
+```ts
+const estimate = await client.estimate_cost({
+  bbox: '18.06,59.32,18.09,59.34',
+  tags: ['building'],
+});
+console.log(estimate.estimated_credits);
+```
+
+## `usage`
+
+This month's unit-budget usage via `GET /v1/usage`.
+
+```ts
+const usage = await client.usage();
+console.log(usage.tier, usage.usage_this_month, usage.remaining_this_month);
+```
+
+## `places_search` / `places_nearby` / `places_details`
+
+Place discovery and lookup. Search is a bbox or `location`+`radius`. Nearby ranks one set from a point. Details refetches a search/nearby feature id (`node/123`). Search and nearby hours use each place's local timezone; optional `asOf` pins the evaluation instant.
+
+```ts
+const origin = { lat: 59.316, lon: 18.075 };
+
+const cafes = await client.places_search({
+  location: origin,
+  radius: 800,
+  orTags: ['amenity=cafe'],
+  openNow: true,
+  asOf: '2026-08-10T18:00:00+02:00',
+});
+
+const nearby = await client.places_nearby({
+  location: origin,
+  orTags: ['amenity=cafe'],
+  limit: 5,
+  openNow: true,
+  asOf: '2026-08-10T18:00:00+02:00',
+});
+
+const first = (cafes.features as { id: string }[])[0];
+const details = await client.places_details({ osmType: first.id });
+```
+
+`places_details` also accepts `{ osmType: 'node', osmId: 123 }`. Hours are annotated at request time in the place's local timezone.
+
+## `routes_isochrone` / `routes_path` / `routes_optimized_path`
+
+Walk or bicycle routing via `POST /v1/routes/*`. Points accept `lon` or `lng`.
+
+```ts
+const origin = { lon: 18.075, lat: 59.316 };
+const cafe = { lon: 18.08, lat: 59.318 };
+
+const iso = await client.routes_isochrone({
+  origin,
+  durationS: 600,
+});
+
+const path = await client.routes_path({
+  stops: [origin, cafe],
+});
+
+const tour = await client.routes_optimized_path({
+  start: origin,
+  stops: [cafe],
+});
+```
+
+`routes_isochrone` takes exactly one of `maxDistanceM` or `durationS`. `routes_path` follows `stops` in listed order (no TSP). `routes_optimized_path` orders `stops` from `start`; `loop` (default true) returns to start. Optional `searchBufferM` and `travelMode` (`WALK` or `BICYCLE`).
 
 Read the full API reference here [https://maplark.com/developer](https://maplark.com/developer) such as the OpenAPI 2.0 HTTP docs.

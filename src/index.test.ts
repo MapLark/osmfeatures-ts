@@ -171,7 +171,8 @@ async function main(): Promise<void> {
     max_area_m2: '9000',
     min_length_m: '12.5',
     max_length_m: '500',
-    around: '18.06,59.33,250',
+    location: '59.33,18.06',
+    radius: '250',
     osm_ids: '111, 222',
     disable_budget_warning: 'true',
     centroid: 'true',
@@ -189,10 +190,27 @@ async function main(): Promise<void> {
   assert.equal(minAreaUrls[0]?.searchParams.get('max_area_m2'), '9000');
   assert.equal(minAreaUrls[0]?.searchParams.get('min_length_m'), '12.5');
   assert.equal(minAreaUrls[0]?.searchParams.get('max_length_m'), '500');
-  assert.equal(minAreaUrls[0]?.searchParams.get('around'), '18.06,59.33,250');
+  assert.equal(minAreaUrls[0]?.searchParams.get('location'), '59.33,18.06');
+  assert.equal(minAreaUrls[0]?.searchParams.get('radius'), '250');
+  assert.equal(minAreaUrls[0]?.searchParams.get('around'), null);
   assert.equal(minAreaUrls[0]?.searchParams.get('osm_ids'), '111, 222');
   assert.equal(minAreaUrls[0]?.searchParams.get('disable_budget_warning'), 'true');
   assert.equal(minAreaUrls[0]?.searchParams.get('centroid'), 'true');
+
+  const radiusUrls: URL[] = [];
+  await osmFeatures.query(
+    { location: '59.334,18.063', radius: 500, tags: ['amenity=cafe'] },
+    {
+      fetchFn: async (input) => {
+        radiusUrls.push(toUrl(input));
+        return geojsonPage([]);
+      },
+    },
+  );
+  assert.equal(radiusUrls[0]?.searchParams.get('location'), '59.334,18.063');
+  assert.equal(radiusUrls[0]?.searchParams.get('radius'), '500');
+  assert.equal(radiusUrls[0]?.searchParams.get('around'), null);
+  assert.equal(radiusUrls[0]?.searchParams.get('bbox'), null);
 
   const noMinAreaRequest = osmFeatures.resolveRequest({ zoom: '11', limit: '1' }, buildingsLayer);
   const noMinAreaUrls: URL[] = [];
@@ -442,6 +460,191 @@ async function main(): Promise<void> {
       return true;
     },
   );
+
+  let searchUrl = '';
+  let searchBody: Record<string, unknown> | undefined;
+  const searchOut = await osmFeatures.places_search(
+    {
+      location: { lat: 59.316, lon: 18.075 },
+      radius: 500,
+      orTags: ['amenity=cafe'],
+      openNow: true,
+      asOf: '2026-08-10T18:00:00+02:00',
+      limit: 10,
+    },
+    {
+      fetchFn: async (input, init) => {
+        searchUrl = toUrl(input).pathname;
+        searchBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response(
+          JSON.stringify({ type: 'FeatureCollection', features: [] }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      },
+    },
+  );
+  assert.equal(searchOut['type'], 'FeatureCollection');
+  assert.equal(searchUrl, '/v1/places/search');
+  assert.deepEqual(searchBody?.['location'], { lat: 59.316, lng: 18.075 });
+  assert.deepEqual(searchBody?.['orTags'], ['amenity=cafe']);
+  assert.equal(searchBody?.['openNow'], true);
+  assert.equal(searchBody?.['asOf'], '2026-08-10T18:00:00+02:00');
+
+  let nearbyUrl = '';
+  let nearbyBody: Record<string, unknown> | undefined;
+  const nearbyOut = await osmFeatures.places_nearby(
+    {
+      location: { lat: 59.3, lng: 18.0 },
+      limit: 3,
+      openNow: true,
+      asOf: '2026-08-10T18:00:00+02:00',
+    },
+    {
+      fetchFn: async (input, init) => {
+        nearbyUrl = toUrl(input).pathname;
+        nearbyBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response(
+          JSON.stringify({ status: 'ok', items: [] }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      },
+    },
+  );
+  assert.equal(nearbyOut['status'], 'ok');
+  assert.equal(nearbyUrl, '/v1/places/nearby');
+  assert.equal(nearbyBody?.['openNow'], true);
+  assert.equal(nearbyBody?.['asOf'], '2026-08-10T18:00:00+02:00');
+
+  let detailsUrl = '';
+  const detailsOut = await osmFeatures.places_details(
+    { osmType: 'node/123' },
+    {
+      fetchFn: async (input) => {
+        detailsUrl = toUrl(input).pathname;
+        return new Response(
+          JSON.stringify({ status: 'ok', feature: { id: 'node/123' } }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      },
+    },
+  );
+  assert.equal(detailsOut['status'], 'ok');
+  assert.equal(detailsUrl, '/v1/places/node/123');
+
+  await assert.rejects(
+    async () => osmFeatures.places_details({ osmType: 'highway', osmId: 1 }),
+    (error: unknown) => {
+      const appError = error as AppError;
+      assert.equal(appError.status, 400);
+      assert.equal(appError.code, 'invalid_place_id');
+      return true;
+    },
+  );
+
+  let costUrl = '';
+  let costSearch = '';
+  const costOut = await osmFeatures.estimate_cost(
+    { bbox: '18.06,59.32,18.09,59.34', tags: ['building'], zoom: 9 },
+    {
+      fetchFn: async (input) => {
+        const url = toUrl(input);
+        costUrl = url.pathname;
+        costSearch = url.search;
+        return new Response(
+          JSON.stringify({ estimated_credits: 42, tier_limits: {}, hints: [] }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      },
+    },
+  );
+  assert.equal(costOut['estimated_credits'], 42);
+  assert.equal(costUrl, '/v2/osm_features/cost');
+  assert.ok(costSearch.includes('bbox='));
+  assert.ok(costSearch.includes('tags=building'));
+  assert.ok(costSearch.includes('zoom=9'));
+
+  let usageUrl = '';
+  const usageOut = await osmFeatures.usage({
+    fetchFn: async (input) => {
+      usageUrl = toUrl(input).pathname;
+      return new Response(
+        JSON.stringify({ tier: 'standard', usage_this_month: 1 }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      );
+    },
+  });
+  assert.equal(usageOut['tier'], 'standard');
+  assert.equal(usageUrl, '/v1/usage');
+
+  let isoUrl = '';
+  let isoBody: Record<string, unknown> | undefined;
+  const isoOut = await osmFeatures.routes_isochrone(
+    { origin: { lon: 18.075, lat: 59.316 }, maxDistanceM: 500 },
+    {
+      fetchFn: async (input, init) => {
+        isoUrl = toUrl(input).pathname;
+        isoBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response(
+          JSON.stringify({ status: 'ok', geometry: { type: 'Polygon', coordinates: [] } }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      },
+    },
+  );
+  assert.equal(isoOut['status'], 'ok');
+  assert.equal(isoUrl, '/v1/routes/isochrone');
+  assert.deepEqual(isoBody?.['origin'], { lon: 18.075, lat: 59.316 });
+  assert.equal(isoBody?.['max_distance_m'], 500);
+  assert.equal(isoBody?.['travelMode'], 'WALK');
+
+  let pathUrl = '';
+  let pathBody: Record<string, unknown> | undefined;
+  const pathOut = await osmFeatures.routes_path(
+    {
+      stops: [{ lon: 18.075, lat: 59.316 }, { lng: 18.08, lat: 59.318 }],
+    },
+    {
+      fetchFn: async (input, init) => {
+        pathUrl = toUrl(input).pathname;
+        pathBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response(
+          JSON.stringify({ status: 'ok', geometry: { type: 'LineString', coordinates: [] } }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      },
+    },
+  );
+  assert.equal(pathOut['status'], 'ok');
+  assert.equal(pathUrl, '/v1/routes/path');
+  assert.deepEqual(pathBody?.['stops'], [{ lon: 18.075, lat: 59.316 }, { lon: 18.08, lat: 59.318 }]);
+  assert.equal(pathBody?.['travelMode'], 'WALK');
+  assert.equal('loop' in (pathBody ?? {}), false);
+
+  let optUrl = '';
+  let optBody: Record<string, unknown> | undefined;
+  const optOut = await osmFeatures.routes_optimized_path(
+    {
+      start: { lon: 18.075, lat: 59.316 },
+      stops: [{ lng: 18.08, lat: 59.318 }],
+      travelMode: 'BICYCLE',
+    },
+    {
+      fetchFn: async (input, init) => {
+        optUrl = toUrl(input).pathname;
+        optBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response(
+          JSON.stringify({ status: 'ok' }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      },
+    },
+  );
+  assert.equal(optOut['status'], 'ok');
+  assert.equal(optUrl, '/v1/routes/optimized_path');
+  assert.deepEqual(optBody?.['start'], { lon: 18.075, lat: 59.316 });
+  assert.deepEqual(optBody?.['stops'], [{ lon: 18.08, lat: 59.318 }]);
+  assert.equal(optBody?.['loop'], true);
+  assert.equal(optBody?.['travelMode'], 'BICYCLE');
 
   console.log('osmfeatures checks passed');
 }

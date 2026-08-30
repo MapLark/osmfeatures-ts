@@ -59,6 +59,7 @@ export const OSM_FEATURES_LAYER_PRESETS: Record<OSMFeaturesPresetId, OSMFeatures
       'amenity=pub',
       'amenity=biergarten',
     ],
+    shape: 'polygon',
   },
   shops_commerce: {
     id: 'shops_commerce',

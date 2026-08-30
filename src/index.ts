@@ -68,7 +68,7 @@ function metaFromHeaders(headers: Headers, featureCount: number): OSMFeaturesMet
 
 /** Layer filters from presets / custom resolve. Pass into `resolveRequest` or spread into `query`. */
 export type OSMFeaturesLayer = {
-  bbox: string;
+  bbox?: string;
   tags?: string[];
   orTags?: string[];
   notTags?: string[];
@@ -81,7 +81,10 @@ export type OSMFeaturesParams = OSMFeaturesLayer & {
   limit?: number;
   cursor?: string;
   zoom?: number;
-  around?: string;
+  /** Point for a radius search as `lat,lng`. Requires `radius`. */
+  location?: string;
+  /** Search radius in metres. Requires `location`. */
+  radius?: number;
   osmIds?: string;
   minLengthM?: number;
   maxLengthM?: number;
@@ -97,6 +100,63 @@ export type OSMFeaturesParams = OSMFeaturesLayer & {
 
 type QueryValue = unknown;
 export type OSMFeaturesQuery = Record<string, QueryValue>;
+
+/** Routing point. Accepts ``lon`` or ``lng``. */
+export type LonLat = { lat: number } & ({ lon: number } | { lng: number });
+export type RouteTravelMode = 'WALK' | 'BICYCLE';
+
+export type RoutesIsochroneParams = {
+  origin: LonLat;
+  maxDistanceM?: number;
+  durationS?: number;
+  searchBufferM?: number;
+  travelMode?: RouteTravelMode;
+};
+
+export type RoutesPathParams = {
+  stops: LonLat[];
+  searchBufferM?: number;
+  travelMode?: RouteTravelMode;
+};
+
+export type RoutesOptimizedPathParams = {
+  start: LonLat;
+  stops: LonLat[];
+  searchBufferM?: number;
+  loop?: boolean;
+  travelMode?: RouteTravelMode;
+};
+
+export type PlacesSearchParams = {
+  bbox?: string;
+  location?: LonLat;
+  radius?: number;
+  type?: string;
+  tags?: string[];
+  orTags?: string[];
+  limit?: number;
+  openNow?: boolean;
+  asOf?: string;
+};
+
+export type PlacesNearbyParams = {
+  location: LonLat;
+  radius?: number;
+  type?: string;
+  tags?: string[];
+  orTags?: string[];
+  limit?: number;
+  openNow?: boolean;
+  asOf?: string;
+};
+
+export type PlacesDetailsParams = {
+  /** ``node`` / ``way`` / ``relation``, or a full ``node/123`` feature id. */
+  osmType: string;
+  osmId?: number | string;
+};
+
+const PLACE_TYPES = new Set(['node', 'way', 'relation']);
 
 type OSMFeaturesDependencies = {
   fetchFn?: typeof fetch;
@@ -249,11 +309,12 @@ export function splitBbox(bbox: string, tileCount: number): string[] {
 }
 
 type RawQueryParams = {
-  bbox: string;
+  bbox?: string;
   limit: number;
   cursor?: string;
   zoom?: number;
-  around?: string;
+  location?: string;
+  radius?: number;
   osmIds?: string;
   minLengthM?: number;
   maxLengthM?: number;
@@ -272,7 +333,9 @@ type RawQueryParams = {
 
 function buildFeaturesQuery(params: RawQueryParams): URLSearchParams {
   const query = new URLSearchParams();
-  query.set('bbox', params.bbox);
+  if (params.bbox) {
+    query.set('bbox', params.bbox);
+  }
   query.set('limit', String(params.limit));
   if (params.cursor) {
     query.set('cursor', params.cursor);
@@ -280,8 +343,11 @@ function buildFeaturesQuery(params: RawQueryParams): URLSearchParams {
   if (params.zoom != null) {
     query.set('zoom', String(params.zoom));
   }
-  if (params.around) {
-    query.set('around', params.around);
+  if (params.location) {
+    query.set('location', params.location);
+  }
+  if (params.radius != null) {
+    query.set('radius', String(params.radius));
   }
   if (params.osmIds) {
     query.set('osm_ids', params.osmIds);
@@ -323,6 +389,130 @@ function buildFeaturesQuery(params: RawQueryParams): URLSearchParams {
     query.append('not_tags', tag);
   }
   return query;
+}
+
+function lonlat(point: LonLat): { lon: number; lat: number } {
+  const lon = 'lon' in point ? point.lon : point.lng;
+  return { lon, lat: point.lat };
+}
+
+function latlng(point: LonLat): { lat: number; lng: number } {
+  const lng = 'lng' in point ? point.lng : point.lon;
+  return { lat: point.lat, lng };
+}
+
+function parsePlaceRef(osmType: string, osmId?: number | string): { osmType: string; osmId: number } {
+  if (osmId == null) {
+    const raw = osmType.trim();
+    const slash = raw.indexOf('/');
+    if (slash < 0) {
+      throw appError(400, 'invalid_place_id', 'place id must be node|way|relation plus a positive osm_id');
+    }
+    return parsePlaceRef(raw.slice(0, slash), raw.slice(slash + 1));
+  }
+  const kind = osmType.trim().toLowerCase();
+  if (!PLACE_TYPES.has(kind)) {
+    throw appError(400, 'invalid_place_id', 'osm_type must be node, way, or relation');
+  }
+  const n = typeof osmId === 'number' ? osmId : Number.parseInt(String(osmId).trim(), 10);
+  if (!Number.isInteger(n) || n <= 0) {
+    throw appError(400, 'invalid_place_id', 'osm_id must be a positive integer');
+  }
+  return { osmType: kind, osmId: n };
+}
+
+function placesSearchBody(params: PlacesSearchParams): Record<string, unknown> {
+  const body: Record<string, unknown> = { limit: params.limit ?? 100 };
+  if (params.bbox != null) {
+    body['bbox'] = params.bbox;
+  }
+  if (params.location != null) {
+    body['location'] = latlng(params.location);
+  }
+  if (params.radius != null) {
+    body['radius'] = params.radius;
+  }
+  if (params.type != null) {
+    body['type'] = params.type;
+  }
+  if (params.tags?.length) {
+    body['tags'] = params.tags;
+  }
+  if (params.orTags?.length) {
+    body['orTags'] = params.orTags;
+  }
+  if (params.openNow) {
+    body['openNow'] = true;
+  }
+  if (params.asOf != null) {
+    body['asOf'] = params.asOf;
+  }
+  return body;
+}
+
+function placesNearbyBody(params: PlacesNearbyParams): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    location: latlng(params.location),
+    radius: params.radius ?? 1000,
+    limit: params.limit ?? 10,
+  };
+  if (params.type != null) {
+    body['type'] = params.type;
+  }
+  if (params.tags?.length) {
+    body['tags'] = params.tags;
+  }
+  if (params.orTags?.length) {
+    body['orTags'] = params.orTags;
+  }
+  if (params.openNow) {
+    body['openNow'] = true;
+  }
+  if (params.asOf != null) {
+    body['asOf'] = params.asOf;
+  }
+  return body;
+}
+
+function routesIsochroneBody(params: RoutesIsochroneParams): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    origin: lonlat(params.origin),
+    travelMode: params.travelMode ?? 'WALK',
+  };
+  if (params.maxDistanceM != null) {
+    body['max_distance_m'] = params.maxDistanceM;
+  }
+  if (params.durationS != null) {
+    body['duration_s'] = params.durationS;
+  }
+  if (params.searchBufferM != null) {
+    body['search_buffer_m'] = params.searchBufferM;
+  }
+  return body;
+}
+
+function routesPathBody(params: RoutesPathParams): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    stops: params.stops.map(lonlat),
+    travelMode: params.travelMode ?? 'WALK',
+  };
+  if (params.searchBufferM != null) {
+    body['search_buffer_m'] = params.searchBufferM;
+  }
+  return body;
+}
+
+function routesOptimizedPathBody(params: RoutesOptimizedPathParams): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    start: lonlat(params.start),
+    stops: params.stops.map(lonlat),
+    loop: params.loop ?? true,
+    travelMode: params.travelMode ?? 'WALK',
+  };
+  if (params.searchBufferM != null) {
+    body['search_buffer_m'] = params.searchBufferM;
+  }
+  return body;
 }
 
 function sleep(ms: number): Promise<void> {
@@ -413,7 +603,8 @@ export class OSMFeatures {
       limit: parseLimit(query),
       cursor: optionalString(query, 'cursor'),
       zoom: optionalNumber(query, 'zoom'),
-      around: optionalString(query, 'around'),
+      location: optionalString(query, 'location'),
+      radius: optionalNumber(query, 'radius'),
       osmIds: optionalString(query, 'osm_ids'),
       minLengthM: optionalNumber(query, 'min_length_m'),
       maxLengthM: optionalNumber(query, 'max_length_m'),
@@ -437,32 +628,21 @@ export class OSMFeatures {
     throw err;
   }
 
-  /** Single HTTP request with retry. Throws on non-OK (same role as Python `_raw_query`). */
-  private async _rawQuery(
-    params: RawQueryParams,
+  /** GET/POST with 429 retry. Throws on non-OK. */
+  private async _fetchOk(
+    url: string,
+    init: RequestInit,
     fetchFn: typeof fetch,
     sleepFn: (ms: number) => Promise<void>,
     nowFn: () => number,
-  ): Promise<OSMFeaturesResult> {
-    const query = buildFeaturesQuery(params);
-    const upstreamUrl = new URL(`${this.apiBaseUrl}/v2/osm_features`);
-    for (const [key, value] of query.entries()) {
-      upstreamUrl.searchParams.append(key, value);
-    }
-
-    let upstream: globalThis.Response;
+  ): Promise<globalThis.Response> {
     let retryAttempt = 0;
-
     while (true) {
+      let upstream: globalThis.Response;
       try {
-        upstream = await fetchFn(upstreamUrl.toString(), {
-          method: 'GET',
-          headers: {
-            Authorization: `Bearer ${this.apiKey}`,
-            Accept: params.accept || GEOJSON_ACCEPT,
-            'User-Agent': 'osmfeatures',
-          },
-          signal: AbortSignal.timeout(this.timeoutMs),
+        upstream = await fetchFn(url, {
+          ...init,
+          signal: init.signal ?? AbortSignal.timeout(this.timeoutMs),
         });
       } catch (error) {
         const subtype = error instanceof DOMException && error.name === 'TimeoutError'
@@ -474,7 +654,7 @@ export class OSMFeatures {
       }
 
       if (upstream.ok) {
-        break;
+        return upstream;
       }
 
       if (upstream.status === 429 && retryAttempt < this.retryAttempts) {
@@ -509,6 +689,92 @@ export class OSMFeatures {
 
       await this.throwUpstreamError(upstream);
     }
+  }
+
+  /** POST JSON to a geo-agent path. */
+  private async _postJson(
+    path: string,
+    body: Record<string, unknown>,
+    fetchFn: typeof fetch,
+    sleepFn: (ms: number) => Promise<void>,
+    nowFn: () => number,
+  ): Promise<Record<string, unknown>> {
+    const upstream = await this._fetchOk(
+      `${this.apiBaseUrl}${path}`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${this.apiKey}`,
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+          'User-Agent': 'osmfeatures',
+        },
+        body: JSON.stringify(body),
+      },
+      fetchFn,
+      sleepFn,
+      nowFn,
+    );
+    return (await upstream.json()) as Record<string, unknown>;
+  }
+
+  /** GET JSON from a geo-agent or account path. */
+  private async _getJson(
+    path: string,
+    query: Record<string, string> | URLSearchParams,
+    fetchFn: typeof fetch,
+    sleepFn: (ms: number) => Promise<void>,
+    nowFn: () => number,
+  ): Promise<Record<string, unknown>> {
+    const url = new URL(`${this.apiBaseUrl}${path}`);
+    const entries = query instanceof URLSearchParams ? query.entries() : Object.entries(query);
+    for (const [key, value] of entries) {
+      url.searchParams.append(key, value);
+    }
+    const upstream = await this._fetchOk(
+      url.toString(),
+      {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${this.apiKey}`,
+          Accept: 'application/json',
+          'User-Agent': 'osmfeatures',
+        },
+      },
+      fetchFn,
+      sleepFn,
+      nowFn,
+    );
+    return (await upstream.json()) as Record<string, unknown>;
+  }
+
+  /** Single HTTP request with retry. Throws on non-OK (same role as Python `_raw_query`). */
+  private async _rawQuery(
+    params: RawQueryParams,
+    fetchFn: typeof fetch,
+    sleepFn: (ms: number) => Promise<void>,
+    nowFn: () => number,
+  ): Promise<OSMFeaturesResult> {
+    const query = buildFeaturesQuery(params);
+    const upstreamUrl = new URL(`${this.apiBaseUrl}/v2/osm_features`);
+    for (const [key, value] of query.entries()) {
+      upstreamUrl.searchParams.append(key, value);
+    }
+
+    const upstream = await this._fetchOk(
+      upstreamUrl.toString(),
+      {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${this.apiKey}`,
+          Accept: params.accept || GEOJSON_ACCEPT,
+          'User-Agent': 'osmfeatures',
+        },
+      },
+      fetchFn,
+      sleepFn,
+      nowFn,
+    );
 
     if (isGeojsonAccept(params.accept)) {
       const body = (await upstream.json()) as OSMGeoJSONPayload;
@@ -538,7 +804,8 @@ export class OSMFeatures {
       limit = DEFAULT_LIMIT,
       cursor,
       zoom,
-      around,
+      location,
+      radius,
       osmIds,
       minLengthM,
       maxLengthM,
@@ -562,7 +829,8 @@ export class OSMFeatures {
         limit,
         cursor,
         zoom,
-        around,
+        location,
+        radius,
         osmIds,
         minLengthM,
         maxLengthM,
@@ -590,7 +858,8 @@ export class OSMFeatures {
       type,
       shape,
       zoom,
-      around,
+      location,
+      radius,
       osmIds,
       minLengthM,
       maxLengthM,
@@ -634,7 +903,7 @@ export class OSMFeatures {
     const nowFn = dependencies.nowFn ?? Date.now;
     const featureCap = maxFeatures == null ? Number.POSITIVE_INFINITY : maxFeatures;
 
-    const tileBboxes = splitBbox(bbox, bboxTiles);
+    const tileBboxes = bbox ? splitBbox(bbox, bboxTiles) : [undefined];
     const allFeatures: unknown[] = [];
     let pageCount = 0;
     let lastPage: OSMGeoJSONResult | null = null;
@@ -653,7 +922,8 @@ export class OSMFeatures {
       shape,
       limit: limitPerPage,
       zoom,
-      around,
+      location,
+      radius,
       osmIds,
       minLengthM,
       maxLengthM,
@@ -757,6 +1027,135 @@ export class OSMFeatures {
       meta.units_charged = unitsCharged;
     }
     return resultFromFeatures(features, meta);
+  }
+
+  /** Preflight credit cost (``GET /v2/osm_features/cost``). */
+  async estimate_cost(
+    params: OSMFeaturesParams = {},
+    dependencies: OSMFeaturesDependencies = {},
+  ): Promise<Record<string, unknown>> {
+    return this._getJson(
+      '/v2/osm_features/cost',
+      buildFeaturesQuery({
+        bbox: params.bbox,
+        tags: params.tags,
+        orTags: params.orTags,
+        notTags: params.notTags,
+        type: params.type,
+        shape: params.shape,
+        limit: params.limit ?? DEFAULT_LIMIT,
+        zoom: params.zoom,
+        location: params.location,
+        radius: params.radius,
+        osmIds: params.osmIds,
+        minLengthM: params.minLengthM,
+        maxLengthM: params.maxLengthM,
+        minAreaM2: params.minAreaM2,
+        maxAreaM2: params.maxAreaM2,
+        disableBudgetWarning: params.disableBudgetWarning,
+        centroid: params.centroid,
+        clipGeometry: params.clipGeometry,
+      }),
+      dependencies.fetchFn ?? fetch,
+      dependencies.sleepFn ?? sleep,
+      dependencies.nowFn ?? Date.now,
+    );
+  }
+
+  /** This month's unit-budget usage (``GET /v1/usage``). */
+  async usage(dependencies: OSMFeaturesDependencies = {}): Promise<Record<string, unknown>> {
+    return this._getJson(
+      '/v1/usage',
+      {},
+      dependencies.fetchFn ?? fetch,
+      dependencies.sleepFn ?? sleep,
+      dependencies.nowFn ?? Date.now,
+    );
+  }
+
+  /** Find places in a bbox or radius (``POST /v1/places/search``). */
+  async places_search(
+    params: PlacesSearchParams,
+    dependencies: OSMFeaturesDependencies = {},
+  ): Promise<Record<string, unknown>> {
+    return this._postJson(
+      '/v1/places/search',
+      placesSearchBody(params),
+      dependencies.fetchFn ?? fetch,
+      dependencies.sleepFn ?? sleep,
+      dependencies.nowFn ?? Date.now,
+    );
+  }
+
+  /** Nearest places from a point (``POST /v1/places/nearby``). */
+  async places_nearby(
+    params: PlacesNearbyParams,
+    dependencies: OSMFeaturesDependencies = {},
+  ): Promise<Record<string, unknown>> {
+    return this._postJson(
+      '/v1/places/nearby',
+      placesNearbyBody(params),
+      dependencies.fetchFn ?? fetch,
+      dependencies.sleepFn ?? sleep,
+      dependencies.nowFn ?? Date.now,
+    );
+  }
+
+  /** One place by OSM id (``GET /v1/places/{osm_type}/{osm_id}``). */
+  async places_details(
+    params: PlacesDetailsParams,
+    dependencies: OSMFeaturesDependencies = {},
+  ): Promise<Record<string, unknown>> {
+    const { osmType, osmId } = parsePlaceRef(params.osmType, params.osmId);
+    return this._getJson(
+      `/v1/places/${osmType}/${osmId}`,
+      {},
+      dependencies.fetchFn ?? fetch,
+      dependencies.sleepFn ?? sleep,
+      dependencies.nowFn ?? Date.now,
+    );
+  }
+
+  /** Reach polygon along the walk/bike network (``POST /v1/routes/isochrone``). */
+  async routes_isochrone(
+    params: RoutesIsochroneParams,
+    dependencies: OSMFeaturesDependencies = {},
+  ): Promise<Record<string, unknown>> {
+    return this._postJson(
+      '/v1/routes/isochrone',
+      routesIsochroneBody(params),
+      dependencies.fetchFn ?? fetch,
+      dependencies.sleepFn ?? sleep,
+      dependencies.nowFn ?? Date.now,
+    );
+  }
+
+  /** Given-order walk/bike path (``POST /v1/routes/path``). */
+  async routes_path(
+    params: RoutesPathParams,
+    dependencies: OSMFeaturesDependencies = {},
+  ): Promise<Record<string, unknown>> {
+    return this._postJson(
+      '/v1/routes/path',
+      routesPathBody(params),
+      dependencies.fetchFn ?? fetch,
+      dependencies.sleepFn ?? sleep,
+      dependencies.nowFn ?? Date.now,
+    );
+  }
+
+  /** TSP walk/bike tour from ``start`` (``POST /v1/routes/optimized_path``). ``loop`` returns to start. */
+  async routes_optimized_path(
+    params: RoutesOptimizedPathParams,
+    dependencies: OSMFeaturesDependencies = {},
+  ): Promise<Record<string, unknown>> {
+    return this._postJson(
+      '/v1/routes/optimized_path',
+      routesOptimizedPathBody(params),
+      dependencies.fetchFn ?? fetch,
+      dependencies.sleepFn ?? sleep,
+      dependencies.nowFn ?? Date.now,
+    );
   }
 }
 
