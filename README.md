@@ -221,9 +221,41 @@ const usage = await client.usage();
 console.log(usage.tier, usage.usage_this_month, usage.remaining_this_month);
 ```
 
+## Geo Agent (places and routes)
+
+`query()` is the generic OpenStreetMap layer: buildings, roads, park polygons, any tag and geometry shape. Geo Agent is the place and mobility layer on the same data. You pick OSM tags, an area, a time, and walk or bike. The API returns GeoJSON coordinates, opening-hours status, nearest-first ranks, and route geometry. You do not compute metres or parse `opening_hours` strings yourself.
+
+Use it for questions like "cafes near me". An AI agent can call the same methods: the model chooses tags and area, the API computes distances and hours.
+
+### Typical questions
+
+| Prompt | SDK |
+|------|-----|
+| "Cafes near me" | `client.places_nearby()` or `client.places_search()` with `location` + `radius` |
+| "Restaurants within 150 m of a station" | two `client.places_search()` calls, then join locally by distance |
+| "Bars open at 20:00" | `client.places_search()` with `asOf`, keep `openingHours.status == "open"` |
+| "Cafes within a 10-minute bike ride" | `client.routes_isochrone()` + `client.places_search()` in a covering radius + keep points inside the polygon |
+| "A walking bar crawl in Stockholm" | `client.places_search()` + `client.routes_optimized_path()` (`loop: true`) |
+| "Walk from my hotel to the cafe, then the office" | `client.routes_path()` with those stops in listed order |
+| "Suggest a walk to a bar, a restaurant, and a cafe, no particular order" | `client.routes_optimized_path()` with `loop: false` |
+| "Is the office a 20-minute walk from the apartment?" | `client.routes_isochrone()` from A, point-in-polygon for B |
+
+### Endpoints in plain language
+
+| HTTP | Client | What it does |
+|------|--------|--------------|
+| `POST /v1/places/search` | `places_search` | Find places (cafes, shops, POIs) in a bounding box or around a GPS point. Optional opening-hours filter. |
+| `POST /v1/places/nearby` | `places_nearby` | Same place search, ranked nearest first from one point. |
+| `GET /v1/places/{osm_type}/{osm_id}` | `places_details` | Reload one place by the `node/123` id that search or nearby returned. |
+| `POST /v1/routes/isochrone` | `routes_isochrone` | Walk or bike reach polygon: everywhere you can get in N metres or N seconds. |
+| `POST /v1/routes/path` | `routes_path` | Walk or bike through stops in the order you list. No reordering. |
+| `POST /v1/routes/optimized_path` | `routes_optimized_path` | Pick a visit order from `start` (bar crawl, errands). `loop` (default true) returns home. |
+
+Hours on search and nearby use each place's local timezone. Optional `openNow` keeps only known-open places. Optional `asOf` pins the clock (for example 20:00 tonight). Routing is walk or bicycle on the OSM network, not driving.
+
 ## `places_search` / `places_nearby` / `places_details`
 
-Place discovery and lookup. Search is a bbox or `location`+`radius`. Nearby ranks one set from a point. Details refetches a search/nearby feature id (`node/123`). Search and nearby hours use each place's local timezone; optional `asOf` pins the evaluation instant.
+Search is a bbox or `location`+`radius`. Nearby ranks one set from a point. Details refetches a search/nearby feature id (`node/123`).
 
 ```ts
 const origin = { lat: 59.316, lon: 18.075 };
