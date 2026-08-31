@@ -18,7 +18,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "tsx src/index.test.ts && tsx src/geojson-feature.test.ts && tsx src/preset/preset.test.ts",
+    "test": "tsx src/index.test.ts && tsx src/geojson-feature.test.ts && tsx src/preset/preset.test.ts && tsx src/tutorial.test.ts",
     "prepare": "npm run build",
     "prepublishOnly": "npm run build"
   },
