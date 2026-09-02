@@ -19,6 +19,9 @@ if (!process.env['MAPLARK_API_KEY']) {
   process.exit(0);
 }
 
+// Tutorials import 'osmfeatures' (copy-paste for the site). That name resolves to
+// local dist/index.js, not npm. Rebuild after SDK source changes or these tests stay stale.
 await import('./tutorial/places_search.js');
 await import('./tutorial/places_nearby.js');
+await import('./tutorial/osm_features_query.js');
 console.log('tutorial.test.ts: ok');

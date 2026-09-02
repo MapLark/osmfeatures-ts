@@ -1,4 +1,4 @@
-import { OSMFeatures } from '../index.js';
+import { OSMFeatures } from 'osmfeatures';
 
 const client = new OSMFeatures(process.env.MAPLARK_API_KEY!, {
   apiBaseUrl: process.env.MAPLARK_BASE_URL,

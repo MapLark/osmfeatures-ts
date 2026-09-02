@@ -36,7 +36,7 @@
   "homepage": "https://maplark.com",
   "repository": {
     "type": "git",
-    "url": "https://github.com/MapLark/osmfeatures-typescript.git"
+    "url": "https://github.com/MapLark/osmfeatures-ts.git"
   },
   "license": "MIT",
   "engines": {
