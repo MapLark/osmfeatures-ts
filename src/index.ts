@@ -73,6 +73,8 @@ export type OSMFeaturesLayer = {
   orTags?: string[];
   notTags?: string[];
   type?: string;
+  wayShape?: 'line' | 'polygon' | 'all';
+  /** @deprecated Use `wayShape`. */
   shape?: 'line' | 'polygon' | 'all';
 };
 
@@ -325,6 +327,8 @@ type RawQueryParams = {
   clipGeometry?: boolean;
   accept?: string;
   type?: string;
+  wayShape?: string;
+  /** @deprecated Use `wayShape`. */
   shape?: string;
   tags?: string[];
   orTags?: string[];
@@ -376,8 +380,9 @@ function buildFeaturesQuery(params: RawQueryParams): URLSearchParams {
   if (params.type) {
     query.set('type', params.type);
   }
-  if (params.shape) {
-    query.set('shape', params.shape);
+  const wayShape = params.wayShape ?? params.shape;
+  if (wayShape) {
+    query.set('way_shape', wayShape);
   }
   for (const tag of params.tags ?? []) {
     query.append('tags', tag);
@@ -800,6 +805,7 @@ export class OSMFeatures {
       orTags,
       notTags,
       type,
+      wayShape,
       shape,
       limit = DEFAULT_LIMIT,
       cursor,
@@ -825,6 +831,7 @@ export class OSMFeatures {
         orTags,
         notTags,
         type,
+        wayShape,
         shape,
         limit,
         cursor,
@@ -856,6 +863,7 @@ export class OSMFeatures {
       orTags,
       notTags,
       type,
+      wayShape,
       shape,
       zoom,
       location,
@@ -919,6 +927,7 @@ export class OSMFeatures {
       orTags,
       notTags,
       type,
+      wayShape,
       shape,
       limit: limitPerPage,
       zoom,
@@ -1042,7 +1051,7 @@ export class OSMFeatures {
         orTags: params.orTags,
         notTags: params.notTags,
         type: params.type,
-        shape: params.shape,
+        wayShape: params.wayShape ?? params.shape,
         limit: params.limit ?? DEFAULT_LIMIT,
         zoom: params.zoom,
         location: params.location,

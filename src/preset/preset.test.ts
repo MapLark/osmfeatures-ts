@@ -161,7 +161,7 @@ async function main(): Promise<void> {
     zoom: '11',
   });
   assert.deepEqual(resolvedWater.orTags, waterwaysRiverOrTags);
-  assert.equal(resolvedWater.shape, 'line');
+  assert.equal(resolvedWater.wayShape, 'line');
 
   assert.deepEqual(
     applyPublicTransportZoomPolicy(OSM_FEATURES_LAYER_PRESETS.public_transport, undefined),
@@ -244,13 +244,13 @@ async function main(): Promise<void> {
       bbox: STOCKHOLM_BBOX,
       tags: ['building'],
       type: 'way,relation',
-      shape: 'polygon',
+      way_shape: 'polygon',
     }),
     {
       bbox: STOCKHOLM_BBOX,
       tags: ['building'],
       type: 'way,relation',
-      shape: 'polygon',
+      wayShape: 'polygon',
     },
   );
 

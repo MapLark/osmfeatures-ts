@@ -24,7 +24,7 @@ const buildingsLayer: OSMFeaturesLayer = {
   bbox: '18.02,59.305,18.115,59.355',
   tags: ['building'],
   type: 'way,relation',
-  shape: 'polygon',
+  wayShape: 'polygon',
 };
 
 const foodLayer: OSMFeaturesLayer = {
@@ -147,7 +147,7 @@ async function main(): Promise<void> {
     tags: ['highway'],
     notTags: ['highway=footway', 'highway=path'],
     type: 'way,relation',
-    shape: 'line',
+    wayShape: 'line',
   };
   const taggedRequest = osmFeatures.resolveRequest({ limit: '1' }, taggedLayer);
   const taggedUrls: URL[] = [];

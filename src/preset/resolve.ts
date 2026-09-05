@@ -27,6 +27,8 @@ export type ResolvedCustomLayer = {
   orTags?: string[];
   notTags?: string[];
   type?: string;
+  wayShape?: 'line' | 'polygon' | 'all';
+  /** @deprecated Use `wayShape`. */
   shape?: 'line' | 'polygon' | 'all';
 };
 
@@ -132,7 +134,7 @@ export function resolvePresetFromQuery(query: PresetQuery): ResolvedPresetLayer 
 
 /**
  * Custom layer: `tags` / `or_tags` / `not_tags` + required `bbox`.
- * Optional `type` / `shape`. Needs at least one positive filter (`tags` or `or_tags`).
+ * Optional `type` / `way_shape`. Needs at least one positive filter (`tags` or `or_tags`).
  */
 export function resolveCustomLayerFromQuery(query: PresetQuery): ResolvedCustomLayer {
   const tags = stringList(query, 'tags');
@@ -156,9 +158,9 @@ export function resolveCustomLayerFromQuery(query: PresetQuery): ResolvedCustomL
   if (type) {
     layer.type = type;
   }
-  const shape = optionalString(query, 'shape');
-  if (shape === 'line' || shape === 'polygon' || shape === 'all') {
-    layer.shape = shape;
+  const wayShape = optionalString(query, 'way_shape') ?? optionalString(query, 'shape');
+  if (wayShape === 'line' || wayShape === 'polygon' || wayShape === 'all') {
+    layer.wayShape = wayShape;
   }
   return layer;
 }

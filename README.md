@@ -12,11 +12,12 @@ The translation layer is very simple:
 
 You filter with the same tags mappers already use (`amenity=cafe`, `building=yes`, and so on). Knowledge from OSM, Overpass, and tagging docs transfers immediately.
 
-To narrow down between "open ways" and "closed ways", use the `shape` parameter:
+To narrow down between "open ways" and "closed ways", use the `way_shape` parameter:
 
-- `shape=line` - open ways (roads, paths, rivers) or line-shaped relations (routes, boundaries)
-- `shape=polygon` - closed ways (buildings, parks) or multipolygon relations.
-- `shape=all` - both shapes (default when shape is omitted).
+- `way_shape=line` - open ways (roads, paths, rivers) or line-shaped relations (routes, boundaries)
+- `way_shape=polygon` - closed ways (buildings, parks) or multipolygon relations.
+- `way_shape=all` - both shapes (default when way_shape is omitted).
+- `shape` is a deprecated alias for `way_shape`.
 
 For example, to get all buildings in an area:
 
@@ -102,7 +103,7 @@ Geometric filters such specific OSM element type, min length, or including centr
 | Param        | Type                   | Default | Description                                                                             |
 | ------------ | ---------------------- | ------- | --------------------------------------------------------------------------------------- |
 | `type`       | `string`               | all     | OSM element types, e.g. `node`, `way`, `relation`, or comma-separated (`way,relation`). |
-| `shape`      | `line | polygon | all` | `all`   | Geometry shape filter for ways and relations.                                           |
+| `wayShape`   | `line | polygon | all` | `all`   | Geometry class for ways and relations. `shape` is a deprecated alias.                   |
 | `centroid`   | `boolean`              | `false` | When `true`, include a centroid on non-point features.                                  |
 | `clipGeometry` | `boolean`            | `true`  | When `true`, clip returned geometry to the requested `bbox`. Set `false` for full geometry. |
 | `minLengthM` | `number`               |         | Minimum length in metres (lines).                                                       |
@@ -168,7 +169,7 @@ console.log(all.meta.page_count, all.meta.has_more, all.meta.units_charged);
 
 ### Params
 
-Same filter params as `query` (`bbox`, `tags`, `orTags`, `notTags`, `type`, `shape`, `zoom`, `location`, `radius`, `osmIds`, `minLengthM`, `maxLengthM`, `minAreaM2`, `maxAreaM2`, `centroid`, `clipGeometry`, `disableBudgetWarning`), plus:
+Same filter params as `query` (`bbox`, `tags`, `orTags`, `notTags`, `type`, `wayShape`, `zoom`, `location`, `radius`, `osmIds`, `minLengthM`, `maxLengthM`, `minAreaM2`, `maxAreaM2`, `centroid`, `clipGeometry`, `disableBudgetWarning`), plus:
 
 
 | Param          | Type            | Default                | Description                                                                                                                                               |

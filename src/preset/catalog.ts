@@ -17,6 +17,8 @@ export type OSMFeaturesLayerPreset = {
   orTags?: string[];
   notTags?: string[];
   type?: string;
+  wayShape?: 'line' | 'polygon';
+  /** @deprecated Use `wayShape`. */
   shape?: 'line' | 'polygon';
 };
 
@@ -26,14 +28,14 @@ export const OSM_FEATURES_LAYER_PRESETS: Record<OSMFeaturesPresetId, OSMFeatures
     label: 'Buildings',
     tags: ['building'],
     type: 'way,relation',
-    shape: 'polygon',
+    wayShape: 'polygon',
   },
   roads_paths: {
     id: 'roads_paths',
     label: 'Roads & paths',
     tags: ['highway'],
     type: 'way,relation',
-    shape: 'line',
+    wayShape: 'line',
   },
   parks_green_space: {
     id: 'parks_green_space',
@@ -59,7 +61,7 @@ export const OSM_FEATURES_LAYER_PRESETS: Record<OSMFeaturesPresetId, OSMFeatures
       'amenity=pub',
       'amenity=biergarten',
     ],
-    shape: 'polygon',
+    wayShape: 'polygon',
   },
   shops_commerce: {
     id: 'shops_commerce',
@@ -134,7 +136,7 @@ export const OSM_FEATURES_LAYER_PRESETS: Record<OSMFeaturesPresetId, OSMFeatures
       'waterway=ditch',
     ],
     type: 'way,relation',
-    shape: 'line',
+    wayShape: 'line',
   },
 };
 
