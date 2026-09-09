@@ -105,7 +105,7 @@ async function main(): Promise<void> {
     osmFeatures.resolveRequest({}, { ...buildingsLayer, bbox: '18.1,59.4,18.0,59.3' }).bbox,
     '18.1,59.4,18.0,59.3',
   );
-  assert.equal(osmFeatures.resolveRequest({}, buildingsLayer).limit, 1000);
+  assert.equal(osmFeatures.resolveRequest({}, buildingsLayer).limit, undefined);
 
   assert.equal(resolveBboxTiles({}), 2);
   assert.equal(resolveBboxTiles({ bbox_tiles: '4' }), 4);
@@ -348,6 +348,15 @@ async function main(): Promise<void> {
   assert.equal(singleQueryUrls.length, 1);
   assert.equal(singleQueryUrls[0]?.searchParams.get('limit'), '1');
 
+  const omittedLimitUrls: URL[] = [];
+  await osmFeatures.query(buildingsLayer, {
+    fetchFn: async (input) => {
+      omittedLimitUrls.push(toUrl(input));
+      return geojsonPage([]);
+    },
+  });
+  assert.equal(omittedLimitUrls[0]?.searchParams.get('limit'), null);
+
   const expectedTiles = splitBbox(buildingsLayer.bbox, 2);
   const tiledUrls: URL[] = [];
   const tiledPayload = await osmFeatures.query_all({ ...buildingsLayer, limitPerPage: 10 }, {
@@ -491,6 +500,7 @@ async function main(): Promise<void> {
   assert.deepEqual(searchBody?.['orTags'], ['amenity=cafe']);
   assert.equal(searchBody?.['openNow'], true);
   assert.equal(searchBody?.['asOf'], '2026-08-10T18:00:00+02:00');
+  assert.equal(searchBody?.['limit'], 10);
 
   let nearbyUrl = '';
   let nearbyBody: Record<string, unknown> | undefined;
@@ -516,6 +526,8 @@ async function main(): Promise<void> {
   assert.equal(nearbyUrl, '/v1/places/nearby');
   assert.equal(nearbyBody?.['openNow'], true);
   assert.equal(nearbyBody?.['asOf'], '2026-08-10T18:00:00+02:00');
+  assert.equal(nearbyBody?.['limit'], 3);
+  assert.equal('radius' in (nearbyBody ?? {}), false);
 
   let detailsUrl = '';
   const detailsOut = await osmFeatures.places_details(
@@ -564,6 +576,7 @@ async function main(): Promise<void> {
   assert.ok(costSearch.includes('bbox='));
   assert.ok(costSearch.includes('tags=building'));
   assert.ok(costSearch.includes('zoom=9'));
+  assert.equal(costSearch.includes('limit='), false);
 
   let usageUrl = '';
   const usageOut = await osmFeatures.usage({
@@ -597,7 +610,7 @@ async function main(): Promise<void> {
   assert.equal(isoUrl, '/v1/routes/isochrone');
   assert.deepEqual(isoBody?.['origin'], { lon: 18.075, lat: 59.316 });
   assert.equal(isoBody?.['max_distance_m'], 500);
-  assert.equal(isoBody?.['travelMode'], 'WALK');
+  assert.equal('travelMode' in (isoBody ?? {}), false);
 
   let pathUrl = '';
   let pathBody: Record<string, unknown> | undefined;
@@ -619,7 +632,7 @@ async function main(): Promise<void> {
   assert.equal(pathOut['status'], 'ok');
   assert.equal(pathUrl, '/v1/routes/path');
   assert.deepEqual(pathBody?.['stops'], [{ lon: 18.075, lat: 59.316 }, { lon: 18.08, lat: 59.318 }]);
-  assert.equal(pathBody?.['travelMode'], 'WALK');
+  assert.equal('travelMode' in (pathBody ?? {}), false);
   assert.equal('loop' in (pathBody ?? {}), false);
 
   let optUrl = '';
@@ -645,7 +658,7 @@ async function main(): Promise<void> {
   assert.equal(optUrl, '/v1/routes/optimized_path');
   assert.deepEqual(optBody?.['start'], { lon: 18.075, lat: 59.316 });
   assert.deepEqual(optBody?.['stops'], [{ lon: 18.08, lat: 59.318 }]);
-  assert.equal(optBody?.['loop'], true);
+  assert.equal('loop' in (optBody ?? {}), false);
   assert.equal(optBody?.['travelMode'], 'BICYCLE');
 
   assert.equal(isOpenNow({ properties: { openNow: true } }), true);

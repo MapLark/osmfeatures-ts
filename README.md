@@ -121,7 +121,7 @@ Extra filters to for pagination, output format (accept),
 | Param                  | Type      | Default                | Description                                                                                                                                                               |
 | ---------------------- | --------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `accept`               | `string`  | `application/geo+json` | Response media type in header. Options - `application/geo+json`, `text/csv`, `text/tab-separated-values`, `application/flatgeobuf`, and `application/vnd.apache.parquet`. |
-| `limit`                | `number`  | `1000`                 | Page size. Max `6000`.                                                                                                                                                    |
+| `limit`                | `number`  | API `1000`             | Page size. Omit to use the API default. Max `6000`.                                                                                                       |
 | `cursor`               | `string`  |                        | Pagination cursor from a previous `meta.next_cursor`.                                                                                                                     |
 | `disableBudgetWarning` | `boolean` | `false`                | Ignore warnings for large queries that consume budget quotas.                                                                                                             |
 | `zoom`                 | `number`  |                        | Map zoom hint (used by presets / server-side simplification policies).                                                                                                    |
@@ -173,7 +173,7 @@ Same filter params as `query` (`bbox`, `tags`, `orTags`, `notTags`, `type`, `way
 
 | Param          | Type            | Default                | Description                                                                                                                                               |
 | -------------- | --------------- | ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `limitPerPage` | `number`        | `1000`                 | Upstream `limit` per HTTP request (page size).                                                                                                            |
+| `limitPerPage` | `number`        | API `1000`             | Upstream `limit` per HTTP request (page size). Omit to use the API default.                                                                               |
 | `bboxTiles`    | `number`        | `2`                    | Split `bbox` into this many tiles (must be a power of 2: `1`, `2`, `4`, `8`, …). Each tile is paginated separately, then features are merged and deduped. |
 | `maxPages`     | `number`        | `15`                   | Max pages fetched **per tile**.                                                                                                                           |
 | `maxFeatures`  | `number | null` | `55000`                | Cap on merged features after dedupe. Pass `null` for no cap.                                                                                              |
@@ -237,7 +237,7 @@ These endpoints answer questions like "cafes near me", "bars open at 20:00", or 
 | `routes_path` | `POST /v1/routes/path` | Walk or bike through stops in the order you list them. No reordering. |
 | `routes_optimized_path` | `POST /v1/routes/optimized_path` | Order the stops for you (a tour from `start`). `loop` (default true) returns to start. |
 
-Search and nearby hours use each place's local timezone. Optional `asOf` pins the evaluation instant. Routing is walk or bicycle on the OSM network (`travelMode`: `WALK` or `BICYCLE`). Car routing is not available yet.
+Search and nearby hours use each place's local timezone. Optional `asOf` pins the evaluation instant. Routing is walk or bicycle on the OSM network (`travelMode`: `WALK` or `BICYCLE`; API default `WALK`). Car routing is not available yet. The client omits unspecified fields so API defaults apply (`places_search` limit 100, `places_nearby` radius 1000 and limit 100, `loop` true).
 
 #### Typical questions
 

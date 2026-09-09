@@ -80,6 +80,7 @@ export type OSMFeaturesLayer = {
 
 /** Flat query params (same idea as Python `query(**params)`). */
 export type OSMFeaturesParams = OSMFeaturesLayer & {
+  /** Page size. Omit to use the API default (1000). Max `6000`. */
   limit?: number;
   cursor?: string;
   zoom?: number;
@@ -93,8 +94,9 @@ export type OSMFeaturesParams = OSMFeaturesLayer & {
   minAreaM2?: number;
   maxAreaM2?: number;
   disableBudgetWarning?: boolean;
+  /** When true, include `properties.centroid` on non-point features. Omit for the API default (false). */
   centroid?: boolean;
-  /** When true (default), clip returned geometry to the requested bbox. */
+  /** When true, clip returned geometry to the requested bbox. Omit for the API default (false). */
   clipGeometry?: boolean;
   /** Accept media type. Default application/geo+json; other types put bytes in ``data``. */
   accept?: string;
@@ -211,7 +213,6 @@ type OSMFeaturesDependencies = {
 };
 
 const DEFAULT_BASE_URL = 'https://api.maplark.com';
-const DEFAULT_LIMIT = 1000;
 const MAX_LIMIT = 6000;
 const GEOJSON_ACCEPT = 'application/geo+json';
 
@@ -283,14 +284,14 @@ function optionalBoolean(query: OSMFeaturesQuery, key: string): boolean | undefi
   return undefined;
 }
 
-function parseLimit(query: OSMFeaturesQuery, fallback: number = DEFAULT_LIMIT): number {
+function parseLimit(query: OSMFeaturesQuery): number | undefined {
   const raw = optionalString(query, 'limit');
   if (raw == null) {
-    return fallback;
+    return undefined;
   }
   const parsed = Number.parseInt(raw, 10);
   if (!Number.isFinite(parsed)) {
-    return fallback;
+    return undefined;
   }
   if (parsed > MAX_LIMIT) {
     throw appError(400, 'invalid_limit', `limit must be <= ${MAX_LIMIT}.`);
@@ -356,7 +357,7 @@ export function splitBbox(bbox: string, tileCount: number): string[] {
 
 type RawQueryParams = {
   bbox?: string;
-  limit: number;
+  limit?: number;
   cursor?: string;
   zoom?: number;
   location?: string;
@@ -384,7 +385,9 @@ function buildFeaturesQuery(params: RawQueryParams): URLSearchParams {
   if (params.bbox) {
     query.set('bbox', params.bbox);
   }
-  query.set('limit', String(params.limit));
+  if (params.limit != null) {
+    query.set('limit', String(params.limit));
+  }
   if (params.cursor) {
     query.set('cursor', params.cursor);
   }
@@ -412,10 +415,10 @@ function buildFeaturesQuery(params: RawQueryParams): URLSearchParams {
   if (params.maxAreaM2 != null) {
     query.set('max_area_m2', String(params.maxAreaM2));
   }
-  if (params.disableBudgetWarning != null) {
+  if (params.disableBudgetWarning) {
     query.set('disable_budget_warning', String(params.disableBudgetWarning));
   }
-  if (params.centroid != null) {
+  if (params.centroid) {
     query.set('centroid', String(params.centroid));
   }
   if (params.clipGeometry != null) {
@@ -471,7 +474,7 @@ function parsePlaceRef(osmType: string, osmId?: number | string): { osmType: str
 }
 
 function placesSearchBody(params: PlacesSearchParams): Record<string, unknown> {
-  const body: Record<string, unknown> = { limit: params.limit ?? 100 };
+  const body: Record<string, unknown> = {};
   if (params.bbox != null) {
     body['bbox'] = params.bbox;
   }
@@ -490,6 +493,9 @@ function placesSearchBody(params: PlacesSearchParams): Record<string, unknown> {
   if (params.orTags?.length) {
     body['orTags'] = params.orTags;
   }
+  if (params.limit != null) {
+    body['limit'] = params.limit;
+  }
   if (params.openNow) {
     body['openNow'] = true;
   }
@@ -502,9 +508,10 @@ function placesSearchBody(params: PlacesSearchParams): Record<string, unknown> {
 function placesNearbyBody(params: PlacesNearbyParams): Record<string, unknown> {
   const body: Record<string, unknown> = {
     location: latlng(params.location),
-    radius: params.radius ?? 1000,
-    limit: params.limit ?? 10,
   };
+  if (params.radius != null) {
+    body['radius'] = params.radius;
+  }
   if (params.type != null) {
     body['type'] = params.type;
   }
@@ -513,6 +520,9 @@ function placesNearbyBody(params: PlacesNearbyParams): Record<string, unknown> {
   }
   if (params.orTags?.length) {
     body['orTags'] = params.orTags;
+  }
+  if (params.limit != null) {
+    body['limit'] = params.limit;
   }
   if (params.openNow) {
     body['openNow'] = true;
@@ -526,7 +536,6 @@ function placesNearbyBody(params: PlacesNearbyParams): Record<string, unknown> {
 function routesIsochroneBody(params: RoutesIsochroneParams): Record<string, unknown> {
   const body: Record<string, unknown> = {
     origin: lonlat(params.origin),
-    travelMode: params.travelMode ?? 'WALK',
   };
   if (params.maxDistanceM != null) {
     body['max_distance_m'] = params.maxDistanceM;
@@ -537,16 +546,21 @@ function routesIsochroneBody(params: RoutesIsochroneParams): Record<string, unkn
   if (params.searchBufferM != null) {
     body['search_buffer_m'] = params.searchBufferM;
   }
+  if (params.travelMode != null) {
+    body['travelMode'] = params.travelMode;
+  }
   return body;
 }
 
 function routesPathBody(params: RoutesPathParams): Record<string, unknown> {
   const body: Record<string, unknown> = {
     stops: params.stops.map(lonlat),
-    travelMode: params.travelMode ?? 'WALK',
   };
   if (params.searchBufferM != null) {
     body['search_buffer_m'] = params.searchBufferM;
+  }
+  if (params.travelMode != null) {
+    body['travelMode'] = params.travelMode;
   }
   return body;
 }
@@ -555,11 +569,15 @@ function routesOptimizedPathBody(params: RoutesOptimizedPathParams): Record<stri
   const body: Record<string, unknown> = {
     start: lonlat(params.start),
     stops: params.stops.map(lonlat),
-    loop: params.loop ?? true,
-    travelMode: params.travelMode ?? 'WALK',
   };
+  if (params.loop != null) {
+    body['loop'] = params.loop;
+  }
   if (params.searchBufferM != null) {
     body['search_buffer_m'] = params.searchBufferM;
+  }
+  if (params.travelMode != null) {
+    body['travelMode'] = params.travelMode;
   }
   return body;
 }
@@ -851,7 +869,7 @@ export class OSMFeatures {
       type,
       wayShape,
       shape,
-      limit = DEFAULT_LIMIT,
+      limit,
       cursor,
       zoom,
       location,
@@ -921,12 +939,12 @@ export class OSMFeatures {
       centroid,
       clipGeometry,
       accept,
-      limitPerPage = DEFAULT_LIMIT,
+      limitPerPage,
       bboxTiles = 2,
       maxPages = 15,
       maxFeatures = 55_000,
     }: Omit<OSMFeaturesParams, 'limit' | 'cursor'> & {
-      /** Upstream `limit` per HTTP request (page size). */
+      /** Upstream `limit` per HTTP request (page size). Omit to use the API default (1000). */
       limitPerPage?: number;
       bboxTiles?: number;
       maxPages?: number;
@@ -1096,7 +1114,7 @@ export class OSMFeatures {
         notTags: params.notTags,
         type: params.type,
         wayShape: params.wayShape ?? params.shape,
-        limit: params.limit ?? DEFAULT_LIMIT,
+        limit: params.limit,
         zoom: params.zoom,
         location: params.location,
         radius: params.radius,
