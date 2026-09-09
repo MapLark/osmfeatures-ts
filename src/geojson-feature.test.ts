@@ -30,8 +30,22 @@ assert.deepEqual(
   featureCentroid({ geometry: { type: 'Point', coordinates: [18.06, 59.33] } }),
   [18.06, 59.33],
 );
+assert.equal(featureCentroid({ geometry: { type: 'Polygon', coordinates: [[[0, 0], [1, 0], [1, 1], [0, 0]]] } }),
+  null,
+);
+assert.deepEqual(
+  featureCentroid({
+    geometry: { type: 'Polygon', coordinates: [[[0, 0], [1, 0], [1, 1], [0, 0]]] },
+    properties: { centroid: { coordinates: [0.5, 0.5] } },
+  }),
+  [0.5, 0.5],
+);
 assert.equal(
-  featureCentroid({ geometry: { type: 'Polygon', coordinates: [[[0, 0], [1, 0], [1, 1], [0, 0]]] } }),
+  featureCentroid({ geometry: { type: 'Point', coordinates: [Number.NaN, 59] } }),
+  null,
+);
+assert.equal(
+  featureCentroid({ geometry: { type: 'Point', coordinates: [null as unknown as number, 0] } }),
   null,
 );
 

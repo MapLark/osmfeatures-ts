@@ -55,6 +55,16 @@ export function readTags(properties: Record<string, unknown> | undefined): Recor
   return {};
 }
 
+function finiteLonLat(lon: unknown, lat: unknown): [number, number] | null {
+  if (typeof lon !== 'number' || typeof lat !== 'number') {
+    return null;
+  }
+  if (!Number.isFinite(lon) || !Number.isFinite(lat)) {
+    return null;
+  }
+  return [lon, lat];
+}
+
 function collectPositions(coordinates: unknown, out: number[][]): void {
   if (!Array.isArray(coordinates) || coordinates.length === 0) {
     return;
@@ -97,14 +107,12 @@ export function featureCentroid(feature: QueryFeatureLike): [number, number] | n
   const group = geometryGroup(feature.geometry?.type?.trim() ?? '');
   if (group === 'points') {
     const coords = feature.geometry?.coordinates;
-    if (feature.geometry?.type === 'Point' && Array.isArray(coords) && typeof coords[0] === 'number') {
-      return [coords[0] as number, coords[1] as number];
+    if (feature.geometry?.type === 'Point' && Array.isArray(coords)) {
+      return finiteLonLat(coords[0], coords[1]);
     }
     if (feature.geometry?.type === 'MultiPoint' && Array.isArray(coords) && coords.length === 1) {
       const point = coords[0] as number[];
-      if (typeof point?.[0] === 'number') {
-        return [point[0], point[1]!];
-      }
+      return finiteLonLat(point?.[0], point?.[1]);
     }
     return null;
   }
@@ -112,8 +120,8 @@ export function featureCentroid(feature: QueryFeatureLike): [number, number] | n
   const centroid = feature.properties?.['centroid'];
   if (centroid && typeof centroid === 'object' && !Array.isArray(centroid)) {
     const coords = (centroid as { coordinates?: unknown }).coordinates;
-    if (Array.isArray(coords) && typeof coords[0] === 'number' && typeof coords[1] === 'number') {
-      return [coords[0], coords[1]];
+    if (Array.isArray(coords)) {
+      return finiteLonLat(coords[0], coords[1]);
     }
   }
   return null;

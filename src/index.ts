@@ -137,6 +137,7 @@ export type PlacesSearchParams = {
   tags?: string[];
   orTags?: string[];
   limit?: number;
+  /** Keep only places known open at ``asOf`` (or now). Untagged hours are dropped. */
   openNow?: boolean;
   asOf?: string;
 };
@@ -148,9 +149,52 @@ export type PlacesNearbyParams = {
   tags?: string[];
   orTags?: string[];
   limit?: number;
+  /** Keep only places known open at ``asOf`` (or now). Untagged hours are dropped. */
   openNow?: boolean;
   asOf?: string;
 };
+
+/**
+ * Place GeoJSON ``properties`` from search / nearby / details.
+ * ``openNow`` is true/false when hours are evaluable at ``asOf`` (or now);
+ * omitted when missing or unparseable.
+ */
+export type PlaceProperties = {
+  tags?: Record<string, unknown>;
+  openNow?: boolean;
+  centroid?: unknown;
+};
+
+export type PlaceFeatureLike = {
+  properties?: PlaceProperties | Record<string, unknown>;
+  /** ``places_details`` envelope: ``{ status, feature }``. */
+  feature?: PlaceFeatureLike;
+};
+
+function openNowValue(feature: PlaceFeatureLike | undefined): unknown {
+  if (feature == null) {
+    return undefined;
+  }
+  const props = feature.properties;
+  if (props && typeof props === 'object' && 'openNow' in props) {
+    return props['openNow'];
+  }
+  if (feature.feature != null && feature.feature !== feature) {
+    return openNowValue(feature.feature);
+  }
+  return undefined;
+}
+
+/** ``properties.openNow === true`` (known open). Missing / non-boolean is not open. Unwraps ``{ feature }``. */
+export function isOpenNow(feature: PlaceFeatureLike | undefined): boolean {
+  return openNowValue(feature) === true;
+}
+
+/** ``true`` / ``false`` when hours are known; ``undefined`` when the field is omitted. Unwraps ``{ feature }``. */
+export function readOpenNow(feature: PlaceFeatureLike | undefined): boolean | undefined {
+  const value = openNowValue(feature);
+  return typeof value === 'boolean' ? value : undefined;
+}
 
 export type PlacesDetailsParams = {
   /** ``node`` / ``way`` / ``relation``, or a full ``node/123`` feature id. */
@@ -1082,7 +1126,7 @@ export class OSMFeatures {
     );
   }
 
-  /** Find places in a bbox or radius (``POST /v1/places/search``). */
+  /** Find places in a bbox or radius (``POST /v1/places/search``). Features have ``properties.openNow`` when hours are known. */
   async places_search(
     params: PlacesSearchParams,
     dependencies: OSMFeaturesDependencies = {},
@@ -1096,7 +1140,7 @@ export class OSMFeatures {
     );
   }
 
-  /** Nearest places from a point (``POST /v1/places/nearby``). */
+  /** Nearest places from a point (``POST /v1/places/nearby``). Features have ``properties.openNow`` when hours are known. */
   async places_nearby(
     params: PlacesNearbyParams,
     dependencies: OSMFeaturesDependencies = {},
@@ -1110,7 +1154,7 @@ export class OSMFeatures {
     );
   }
 
-  /** One place by OSM id (``GET /v1/places/{osm_type}/{osm_id}``). */
+  /** One place by OSM id (``GET /v1/places/{osm_type}/{osm_id}``). Feature has ``properties.openNow`` when hours are known. */
   async places_details(
     params: PlacesDetailsParams,
     dependencies: OSMFeaturesDependencies = {},
@@ -1169,4 +1213,6 @@ export class OSMFeatures {
 }
 
 export * from './geojson-feature.js';
+export * from './geometry.js';
+export * from './nearest.js';
 export * from './preset/index.js';

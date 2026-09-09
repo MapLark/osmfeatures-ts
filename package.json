@@ -1,6 +1,6 @@
 {
   "name": "osmfeatures",
-  "version": "0.2.4",
+  "version": "0.3.0",
   "description": "Get OpenStreetMap features such as buildings, roads, or points of interest from dedicated servers with a single API call in GeoJSON, FlatGeobuf, Geoparquet, and CSV formats.",
   "type": "module",
   "main": "./dist/index.js",
@@ -18,7 +18,7 @@
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json",
-    "test": "tsx src/index.test.ts && tsx src/geojson-feature.test.ts && tsx src/preset/preset.test.ts && tsx src/tutorial.test.ts",
+    "test": "tsx src/index.test.ts && tsx src/geojson-feature.test.ts && tsx src/geometry.test.ts && tsx src/nearest.test.ts && tsx src/preset/preset.test.ts && tsx src/tutorial.test.ts",
     "prepare": "npm run build",
     "prepublishOnly": "npm run build"
   },

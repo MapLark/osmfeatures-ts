@@ -197,8 +197,9 @@ Same fields as `query`, plus:
 | `relay_partial_reason` | e.g. `upstream_rejected_cursor` or `upstream_rate_limited_after_retries`.            |
 
 
-Also exports layer presets (`resolveLayerFromQuery`, `OSM_FEATURES_LAYER_PRESETS`, ...)
-and GeoJSON payload helpers (`featureCentroid`, `geometryBounds`, `parseFeatureId`, ...).
+Also exports layer presets (`resolveLayerFromQuery`, `OSM_FEATURES_LAYER_PRESETS`, ...),
+GeoJSON payload helpers (`featureCentroid`, `geometryBounds`, `parseFeatureId`, ...),
+and local geo-agent helpers (`nearest_within`, `point_in_geometry`, `isOpenNow`).
 
 ## `estimate_cost`
 
@@ -243,13 +244,13 @@ Search and nearby hours use each place's local timezone. Optional `asOf` pins th
 | Prompt | SDK |
 |------|-----|
 | "Cafes near me" | `client.places_nearby()` or `client.places_search()` with `location` + `radius` |
-| "Restaurants within 150 m of a station" | two `client.places_search()` calls, then join locally by distance |
-| "Bars open at 20:00" | `client.places_search()` with `asOf`, keep `openingHours.status == "open"` |
-| "Cafes within a 10-minute bike ride" | `client.routes_isochrone()` + `client.places_search()` in a covering radius + keep points inside the polygon |
+| "Restaurants within 150 m of a station" | two `client.places_search()` calls, then `nearest_within` |
+| "Bars open at 20:00" | `client.places_search()` with `asOf`, keep `isOpenNow(feature)` |
+| "Cafes within a 10-minute bike ride" | `client.routes_isochrone()` + `client.places_search()` in a covering radius + `point_in_geometry` |
 | "A walking bar crawl in Stockholm" | `client.places_search()` + `client.routes_optimized_path()` (`loop: true`) |
 | "Walk from my hotel to the cafe, then the office" | `client.routes_path()` with those stops in listed order |
 | "Suggest a walk to a bar, a restaurant, and a cafe, no particular order" | `client.routes_optimized_path()` with `loop: false` |
-| "Is the office a 20-minute walk from the apartment?" | `client.routes_isochrone()` from A, point-in-polygon for B |
+| "Is the office a 20-minute walk from the apartment?" | `client.routes_isochrone()` from A, `point_in_geometry` for B |
 
 ### Examples for `places_search` / `places_nearby` / `places_details`
 
@@ -276,7 +277,26 @@ const first = (cafes.features as { id: string }[])[0];
 const details = await client.places_details({ osmType: first.id });
 ```
 
-`places_details` also accepts `{ osmType: 'node', osmId: 123 }`. Hours are annotated at request time in the place's local timezone.
+`places_details` also accepts `{ osmType: 'node', osmId: 123 }`. Hours are annotated at request time in the place's local timezone. Known hours set `properties.openNow` to `true` or `false`; missing or unparseable hours omit the field. Use `isOpenNow(feature)` to keep known-open places (also unwraps the `{ feature }` details envelope).
+
+### "X near Y" (local join)
+
+`places_nearby` ranks against one point. "Restaurants within 150 m of a station" is two searches plus a local join. `nearest_within` does no HTTP.
+
+```ts
+import { nearest_within } from 'osmfeatures';
+
+const bbox = '18.05,59.33,18.10,59.36';
+const restaurants = await client.places_search({ bbox, orTags: ['amenity=restaurant'] });
+const stations = await client.places_search({ bbox, orTags: ['railway=station'] });
+const pairs = nearest_within(restaurants, stations, 150, { limit: 20 });
+
+for (const pair of pairs) {
+  console.log(pair.distance_m, pair.feature, 'near', pair.nearest);
+}
+```
+
+Each pair is `{ feature, distance_m, nearest }`. The point comes from `geometry` when it is a Point, else `properties.centroid` (same rules as `featureCentroid`). A feature with neither throws. Empty secondary returns `[]`. Distances are spherical haversine (mean Earth radius 6371000 m). `limit` keeps the closest pairs (default 20); pass `{ limit: null }` for every primary that has a match. Joins over 500000 comparisons throw; shrink with `places_search` / `places_nearby` `limit`, not `query_all`. `query()` / `query_all()` results (`{ data, meta }`) are accepted.
 
 ### Examples for `routes_isochrone` / `routes_path` / `routes_optimized_path`
 
@@ -299,6 +319,11 @@ const tour = await client.routes_optimized_path({
   start: origin,
   stops: [cafe],
 });
+
+const office = { lon: 18.08, lat: 59.318 };
+point_in_geometry(office.lon, office.lat, iso);
 ```
+
+Local helpers (no HTTP): `nearest_within(primary, secondary, maxDistanceM)` for "X near Y", and `point_in_geometry(lon, lat, geom)` for isochrone containment. `point_in_geometry` accepts a Polygon/MultiPolygon, a Feature, a GeometryCollection, or the isochrone body (`{ geometry }`).
 
 Read the full API reference here [https://maplark.com/developer](https://maplark.com/developer) such as the OpenAPI 2.0 HTTP docs.

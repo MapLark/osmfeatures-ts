@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import {
   OSMFeatures,
+  isOpenNow,
+  readOpenNow,
   resolveBboxTiles,
   splitBbox,
   type OSMFeaturesLayer,
@@ -645,6 +647,26 @@ async function main(): Promise<void> {
   assert.deepEqual(optBody?.['stops'], [{ lon: 18.08, lat: 59.318 }]);
   assert.equal(optBody?.['loop'], true);
   assert.equal(optBody?.['travelMode'], 'BICYCLE');
+
+  assert.equal(isOpenNow({ properties: { openNow: true } }), true);
+  assert.equal(isOpenNow({ properties: { openNow: false } }), false);
+  assert.equal(isOpenNow({ properties: {} }), false);
+  assert.equal(isOpenNow(undefined), false);
+  assert.equal(isOpenNow({ feature: { properties: { openNow: true } } }), true);
+  assert.equal(isOpenNow({ feature: { properties: { openNow: false } } }), false);
+  assert.equal(readOpenNow({ properties: { openNow: true } }), true);
+  assert.equal(readOpenNow({ properties: { openNow: false } }), false);
+  assert.equal(readOpenNow({ properties: {} }), undefined);
+  assert.equal(readOpenNow({ feature: { properties: { openNow: false } } }), false);
+  assert.equal(readOpenNow(undefined), undefined);
+  assert.deepEqual(
+    [
+      { properties: { openNow: true } },
+      { properties: { openNow: false } },
+      { properties: {} },
+    ].filter(isOpenNow).map((f) => f.properties?.['openNow']),
+    [true],
+  );
 
   console.log('osmfeatures checks passed');
 }
