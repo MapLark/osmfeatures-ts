@@ -1,28 +1,41 @@
-# OSM Features API client
+# TypeScript OSM Features client
 
-Official client for the [MapLark OSM Features API](https://maplark.com) to get GeoJSON, FlatGeobuf, GeoParquet, or CSV from OpenStreetMap. The API gets data from dedicated postgis OSM servers separate from public Overpass.
+npm package for the [MapLark OSM Features API](https://maplark.com). Fetch OpenStreetMap buildings, roads, parks, and POIs as GeoJSON, FlatGeobuf, GeoParquet, or CSV from Node.js or the browser without standing up Overpass or converting extracts by hand. Simply search by tag and bounding box or location + radius. The API keeps OSM semantics intact, like node, way, relation, and returns GeoJSON Features you can feed straight into Leaflet, MapLibre, OpenLayers, or any geospatial toolchain. Use this lib to build geospatial apps on OSM easily without hitting rate limits or setting up complex and expensive infrastructure yourself.
 
-Query OpenStreetMap features such as buildings, streets, and POIs easily. Search for OSM features by bounding box, tags, and geometry shape and get GeoJSON back within less than 250ms (dependent on query size). No converting between formats manually. The API keeps OSM semantics intact, like tags and ways, and returns OSM features you can feed straight into Leaflet, MapLibre, OpenLayers, or any geospatial toolchain. It is backed by postgis with tiered API keys and rate limiting to keep noisy neighbours out to give you low, predictable latency for real traffic. It also has a self-host path for those willing to host complex infrastructure themselves, and Geo Agent methods for places search, opening hours, and walk or bike routing.
+The backend is dedicated PostGIS, not the public Overpass endpoint, with API keys and rate limits so map tiles and POI queries stay fast under load. This SDK also covers local-search and mobility: amenity lookup, OSM opening hours, and walk or bicycle routing.
 
-The translation layer is very simple:
+## Contents
 
-- `node` - GIS Point
-- `way` - LineString or Polygon
-- `relation` - MultiPolygon or grouped geometries
+- [Quick start](#quick-start)
+- [Functions and Parameters](#functions-and-parameters)
+  - [query()](#query)
+  - [query_all](#query_all)
+  - [estimate_cost](#estimate_cost)
+  - [usage](#usage)
+- [Places and routes](#places-and-routes)
+  - [Places search](#places-search)
+  - [Nearby](#nearby-ranked-from-a-point)
+  - [Place details](#place-details)
+  - [Opening hours](#opening-hours)
+  - [X near Y](#x-near-y-local-join)
+  - [Walk and bike routes](#walk-and-bike-routes)
+- [MCP server](#mcp-server)
 
-You filter with the same tags mappers already use (`amenity=cafe`, `building=yes`, and so on). Knowledge from OSM, Overpass, and tagging docs transfers immediately.
+OSM types map to GeoJSON the way GIS tools expect:
 
-To narrow down between "open ways" and "closed ways", use the `way_shape` parameter:
+- `node` → Point
+- `way` → LineString or Polygon
+- `relation` → MultiPolygon or a bundle of geometries
 
-- `way_shape=line` - open ways (roads, paths, rivers) or line-shaped relations (routes, boundaries)
-- `way_shape=polygon` - closed ways (buildings, parks) or multipolygon relations.
-- `way_shape=all` - both shapes (default when way_shape is omitted).
+Filters use ordinary OSM tags (`amenity=cafe`, `building=yes`). If you already write Overpass or edit OSM, the same keys work here. Drop a FeatureCollection into Leaflet, MapLibre, OpenLayers, or Turf.
 
-For example, to get all buildings in an area:
+Use `way_shape` when you need lines vs areas:
 
-`type=way & tags=building`
+- `way_shape=line` — unclosed ways (streets, footpaths, rivers) and line-like relations (routes, some boundaries)
+- `way_shape=polygon` — closed ways (building footprints, parks) and multipolygon relations
+- `way_shape=all` — both (the default if you leave it off)
 
-This is the equivalent of the Overpass query `way[building]`.
+Buildings in a box: `type=way & tags=building` — the same idea as Overpass `way[building]`.
 
 # Quick start
 
@@ -199,7 +212,7 @@ Same fields as `query`, plus:
 
 Also exports layer presets (`resolveLayerFromQuery`, `OSM_FEATURES_LAYER_PRESETS`, ...),
 GeoJSON payload helpers (`featureCentroid`, `geometryBounds`, `parseFeatureId`, ...),
-and local geo-agent helpers (`nearest_within`, `point_in_geometry`, `isOpenNow`).
+and local helpers (`nearest_within`, `point_in_geometry`, `isOpenNow`).
 
 ## `estimate_cost`
 
@@ -222,37 +235,15 @@ const usage = await client.usage();
 console.log(usage.tier, usage.usage_this_month, usage.remaining_this_month);
 ```
 
-## Geo Agent (places and routes)
+## Places and routes
 
-`query()` is the generic OpenStreetMap layer: buildings, roads, park polygons, any tag and geometry shape. Geo Agent is the place and mobility layer on top of the same OSM data. You pick OSM tags (`amenity=cafe`), an area, a time, and walk or bike. The API returns coordinates, opening-hours status, nearest-first ranks, and walk or bike geometry.
+`query()` is the raw OSM layer: footprints, highways, park polygons, any tag and geometry class. Places and routes sit on the same planet extract but answer product questions: amenities in a box, ranked POIs from a pin, opening hours, walk/bike isochrones, and multi-stop paths. You supply tags, extent, time, and `WALK` or `BICYCLE`. The API returns coordinates, `openNow`, distances, and network geometry.
 
-These endpoints answer questions like "cafes near me", "bars open at 20:00", or "suggest a walking bar crawl in Stockholm". An AI agent or a script can call the same methods.
+Unset fields are omitted so server defaults apply (`places_search` limit 100, `places_nearby` radius 1000 m and limit 100, `loop` true). HTTP docs: [maplark.com/developer](https://maplark.com/developer).
 
-| Endpoint | HTTP | What it does |
-| -------- | ---- | ------------ |
-| `places_search` | `POST /v1/places/search` | Find places in a bounding box **or** a `location` plus `radius`. Filter with OSM tags. Optional `openNow` / `asOf` for opening hours. |
-| `places_nearby` | `POST /v1/places/nearby` | "X near this point". Same tags and hours filters, ranked nearest-first by straight-line distance. |
-| `places_details` | `GET /v1/places/{osm_type}/{osm_id}` | Reload one place by the id search or nearby returned (`node/123`). |
-| `routes_isochrone` | `POST /v1/routes/isochrone` | Walk or bike reach polygon from an origin (how far you can get in N metres or seconds). |
-| `routes_path` | `POST /v1/routes/path` | Walk or bike through stops in the order you list them. No reordering. |
-| `routes_optimized_path` | `POST /v1/routes/optimized_path` | Order the stops for you (a tour from `start`). `loop` (default true) returns to start. |
+### Places search
 
-Search and nearby hours use each place's local timezone. Optional `asOf` pins the evaluation instant. Routing is walk or bicycle on the OSM network (`travelMode`: `WALK` or `BICYCLE`; API default `WALK`). Car routing is not available yet. The client omits unspecified fields so API defaults apply (`places_search` limit 100, `places_nearby` radius 1000 and limit 100, `loop` true).
-
-#### Typical questions
-
-| Prompt | SDK |
-|------|-----|
-| "Cafes near me" | `client.places_nearby()` or `client.places_search()` with `location` + `radius` |
-| "Restaurants within 150 m of a station" | two `client.places_search()` calls, then `nearest_within` |
-| "Bars open at 20:00" | `client.places_search()` with `asOf`, keep `isOpenNow(feature)` |
-| "Cafes within a 10-minute bike ride" | `client.routes_isochrone()` + `client.places_search()` in a covering radius + `point_in_geometry` |
-| "A walking bar crawl in Stockholm" | `client.places_search()` + `client.routes_optimized_path()` (`loop: true`) |
-| "Walk from my hotel to the cafe, then the office" | `client.routes_path()` with those stops in listed order |
-| "Suggest a walk to a bar, a restaurant, and a cafe, no particular order" | `client.routes_optimized_path()` with `loop: false` |
-| "Is the office a 20-minute walk from the apartment?" | `client.routes_isochrone()` from A, `point_in_geometry` for B |
-
-### Examples for `places_search` / `places_nearby` / `places_details`
+`places_search()` looks up POIs inside a bounding box **or** around `{ lat, lon }` + `radius` (pick one). `tags` is AND; `orTags` is OR; both use the same OSM keys as `query()`. Leave `limit` off for the API default (100, max 10_000).
 
 ```ts
 const origin = { lat: 59.316, lon: 18.075 };
@@ -264,7 +255,13 @@ const cafes = await client.places_search({
   openNow: true,
   asOf: '2026-08-10T18:00:00+02:00',
 });
+```
 
+### Nearby (ranked from a point)
+
+`places_nearby()` is “what is closest to this coordinate?”. You must pass `tags` or `orTags`. Hits are ordered by straight-line spheroid distance. Defaults if omitted: 1000 m radius, 100 results.
+
+```ts
 const nearby = await client.places_nearby({
   location: origin,
   orTags: ['amenity=cafe'],
@@ -272,16 +269,34 @@ const nearby = await client.places_nearby({
   openNow: true,
   asOf: '2026-08-10T18:00:00+02:00',
 });
-
-const first = (cafes.features as { id: string }[])[0];
-const details = await client.places_details({ osmType: first.id });
 ```
 
-`places_details` also accepts `{ osmType: 'node', osmId: 123 }`. Hours are annotated at request time in the place's local timezone. Known hours set `properties.openNow` to `true` or `false`; missing or unparseable hours omit the field. Use `isOpenNow(feature)` to keep known-open places (also unwraps the `{ feature }` details envelope).
+### Place details
+
+`places_details()` reloads a single OSM place by the id search or nearby gave you (`node/123`), or as `{ osmType, osmId }`.
+
+```ts
+const first = (cafes.features as { id: string }[])[0];
+const details = await client.places_details({ osmType: first.id });
+// same as: client.places_details({ osmType: 'node', osmId: 123 })
+```
+
+Hours are evaluated at request time in that place’s timezone.
+
+### Opening hours
+
+When OSM `opening_hours` can be parsed, the feature gets `properties.openNow` as `true` or `false`. Missing or junk hours omit the field. `isOpenNow(feature)` keeps known-open places and unwraps the details `{ feature }` envelope.
+
+Timezone is inferred from coordinates (IANA). There is no `timezone` request field.
+
+- `openNow: true` drops closed and unknown-hours POIs (Google Places–style `openNow`).
+- `asOf` is the evaluation instant (default: now). An offset (`Z`, `+02:00`) is an absolute instant. A naive `2026-08-10T20:00:00` is local clock at the search point or bbox centre.
+- `asOf` or `openNow` also require an `opening_hours` tag, so untagged amenities do not pad the page.
+- Places that are closed but tagged still appear unless `openNow` is set.
 
 ### "X near Y" (local join)
 
-`places_nearby` ranks against one point. "Restaurants within 150 m of a station" is two searches plus a local join. `nearest_within` does no HTTP.
+`places_nearby` ranks against one origin. “Restaurants within 150 m of a station” is two searches plus an in-process join. `nearest_within` does not hit the API.
 
 ```ts
 import { nearest_within } from 'osmfeatures';
@@ -296,11 +311,13 @@ for (const pair of pairs) {
 }
 ```
 
-Each pair is `{ feature, distance_m, nearest }`. The point comes from `geometry` when it is a Point, else `properties.centroid` (same rules as `featureCentroid`). A feature with neither throws. Empty secondary returns `[]`. Distances are spherical haversine (mean Earth radius 6371000 m). `limit` keeps the closest pairs (default 20); pass `{ limit: null }` for every primary that has a match. Joins over 500000 comparisons throw; shrink with `places_search` / `places_nearby` `limit`, not `query_all`. `query()` / `query_all()` results (`{ data, meta }`) are accepted.
+Each pair is `{ feature, distance_m, nearest }`. The point is `geometry` when it is a Point, otherwise `properties.centroid` (same as `featureCentroid`). Neither present throws. Empty secondary → `[]`. Distances are spherical haversine (mean Earth radius 6371000 m). `limit` keeps the closest pairs (default 20); `{ limit: null }` returns every primary with a match. More than 500000 comparisons throws — lower `places_search` / `places_nearby` `limit`, do not use `query_all`. `{ data, meta }` from `query()` / `query_all()` is accepted.
 
-### Examples for `routes_isochrone` / `routes_path` / `routes_optimized_path`
+### Walk and bike routes
 
-Points accept `lon` or `lng`. `routes_isochrone` takes exactly one of `maxDistanceM` or `durationS`. Optional `searchBufferM` widens the highway fetch corridor.
+Paths follow OSM walk and bicycle ways. Default `travelMode` is `WALK`; pass `'BICYCLE'` for bikes. Driving is not offered yet.
+
+Coordinates take `lon` or `lng`. For `routes_isochrone`, set exactly one of `maxDistanceM` or `durationS`. `searchBufferM` widens the highway fetch if the default corridor cannot form a path.
 
 ```ts
 const origin = { lon: 18.075, lat: 59.316 };
@@ -324,6 +341,10 @@ const office = { lon: 18.08, lat: 59.318 };
 point_in_geometry(office.lon, office.lat, iso);
 ```
 
-Local helpers (no HTTP): `nearest_within(primary, secondary, maxDistanceM)` for "X near Y", and `point_in_geometry(lon, lat, geom)` for isochrone containment. `point_in_geometry` accepts a Polygon/MultiPolygon, a Feature, a GeometryCollection, or the isochrone body (`{ geometry }`).
+In-process (no HTTP): `nearest_within(primary, secondary, maxDistanceM)` for proximity joins, `point_in_geometry(lon, lat, geom)` for isochrone containment. The latter accepts a Polygon/MultiPolygon, a Feature, a GeometryCollection, or `{ geometry }` from the isochrone response.
 
-Read the full API reference here [https://maplark.com/developer](https://maplark.com/developer) such as the OpenAPI 2.0 HTTP docs.
+
+## MCP server
+
+Maplark has an MCP server to integrate OpenStreetMap data into AI and LLMs such as Claude, Cursor, and Copilot. However, it is implemented in another Python sister repo. See [maplark.com/products/mcp-server](https://maplark.com/products/mcp-server) for more details.
+
