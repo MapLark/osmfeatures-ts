@@ -24,4 +24,5 @@ if (!process.env['MAPLARK_API_KEY']) {
 await import('./tutorial/places_search.js');
 await import('./tutorial/places_nearby.js');
 await import('./tutorial/osm_features_query.js');
+await import('./tutorial/osm_features_stats.js');
 console.log('tutorial.test.ts: ok');

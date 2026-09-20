@@ -88,6 +88,8 @@ export type OSMFeaturesParams = OSMFeaturesLayer & {
   location?: string;
   /** Search radius in metres. Requires `location`. */
   radius?: number;
+  /** Polygon spatial anchor as `way/<id>` or `relation/<id>`. Mutually exclusive with `bbox` / `location`. */
+  within?: string;
   osmIds?: string;
   minLengthM?: number;
   maxLengthM?: number;
@@ -100,6 +102,38 @@ export type OSMFeaturesParams = OSMFeaturesLayer & {
   clipGeometry?: boolean;
   /** Accept media type. Default application/geo+json; other types put bytes in ``data``. */
   accept?: string;
+};
+
+/** `GET /v2/osm_features/stats`. Same filters as `query` except paging/geometry extras. */
+export type OSMFeaturesStatsParams = {
+  /** Tag key to group on (required). Features without this key are not counted. */
+  groupBy: string;
+  bbox?: string;
+  location?: string;
+  radius?: number;
+  within?: string;
+  type?: string;
+  wayShape?: 'line' | 'polygon' | 'all';
+  /** @deprecated Use `wayShape`. */
+  shape?: 'line' | 'polygon' | 'all';
+  tags?: string[];
+  orTags?: string[];
+  notTags?: string[];
+  /** Max histogram buckets (API default 100, max 10000). Does not cap the scan. */
+  limit?: number;
+  minLengthM?: number;
+  maxLengthM?: number;
+  minAreaM2?: number;
+  maxAreaM2?: number;
+  disableBudgetWarning?: boolean;
+};
+
+export type OSMStatsGroup = { value: string; count: number };
+
+export type OSMStatsResponse = {
+  groups: OSMStatsGroup[];
+  total: number;
+  truncated: boolean;
 };
 
 type QueryValue = unknown;
@@ -284,6 +318,38 @@ function optionalBoolean(query: OSMFeaturesQuery, key: string): boolean | undefi
   return undefined;
 }
 
+function stringList(query: OSMFeaturesQuery, key: string): string[] {
+  const raw = query[key];
+  if (raw == null || raw === '') {
+    return [];
+  }
+  const values = Array.isArray(raw) ? raw : [raw];
+  const out: string[] = [];
+  for (const value of values) {
+    if (value == null || value === '') {
+      continue;
+    }
+    const trimmed = String(value).trim();
+    if (trimmed) {
+      out.push(trimmed);
+    }
+  }
+  return out;
+}
+
+function queryFromSearchParams(params: URLSearchParams): OSMFeaturesQuery {
+  const out: OSMFeaturesQuery = {};
+  for (const key of new Set(params.keys())) {
+    const all = params.getAll(key);
+    out[key] = all.length <= 1 ? (all[0] ?? '') : all;
+  }
+  return out;
+}
+
+function asQueryMap(query: OSMFeaturesQuery | URLSearchParams): OSMFeaturesQuery {
+  return query instanceof URLSearchParams ? queryFromSearchParams(query) : query;
+}
+
 function parseLimit(query: OSMFeaturesQuery): number | undefined {
   const raw = optionalString(query, 'limit');
   if (raw == null) {
@@ -362,6 +428,8 @@ type RawQueryParams = {
   zoom?: number;
   location?: string;
   radius?: number;
+  within?: string;
+  groupBy?: string;
   osmIds?: string;
   minLengthM?: number;
   maxLengthM?: number;
@@ -399,6 +467,12 @@ function buildFeaturesQuery(params: RawQueryParams): URLSearchParams {
   }
   if (params.radius != null) {
     query.set('radius', String(params.radius));
+  }
+  if (params.within) {
+    query.set('within', params.within);
+  }
+  if (params.groupBy) {
+    query.set('group_by', params.groupBy);
   }
   if (params.osmIds) {
     query.set('osm_ids', params.osmIds);
@@ -672,6 +746,7 @@ export class OSMFeatures {
       zoom: optionalNumber(query, 'zoom'),
       location: optionalString(query, 'location'),
       radius: optionalNumber(query, 'radius'),
+      within: optionalString(query, 'within'),
       osmIds: optionalString(query, 'osm_ids'),
       minLengthM: optionalNumber(query, 'min_length_m'),
       maxLengthM: optionalNumber(query, 'max_length_m'),
@@ -681,6 +756,51 @@ export class OSMFeatures {
       centroid: optionalBoolean(query, 'centroid'),
       clipGeometry: optionalBoolean(query, 'clipGeometry'),
     };
+  }
+
+  /** Map Express/query params into `stats` params. `group_by` is required. */
+  resolveStatsRequest(query: OSMFeaturesQuery | URLSearchParams): OSMFeaturesStatsParams {
+    const q = asQueryMap(query);
+    const groupBy = optionalString(q, 'group_by');
+    if (groupBy == null) {
+      throw appError(400, 'invalid_group_by', 'group_by is required.');
+    }
+    const tags = stringList(q, 'tags');
+    const orTags = stringList(q, 'or_tags');
+    const notTags = stringList(q, 'not_tags');
+    const wayShapeRaw = optionalString(q, 'way_shape') ?? optionalString(q, 'shape');
+    const wayShape =
+      wayShapeRaw === 'line' || wayShapeRaw === 'polygon' || wayShapeRaw === 'all'
+        ? wayShapeRaw
+        : undefined;
+    const params: OSMFeaturesStatsParams = { groupBy };
+    const bbox = optionalString(q, 'bbox');
+    if (bbox) params.bbox = bbox;
+    const within = optionalString(q, 'within');
+    if (within) params.within = within;
+    const location = optionalString(q, 'location');
+    if (location) params.location = location;
+    const radius = optionalNumber(q, 'radius');
+    if (radius != null) params.radius = radius;
+    const type = optionalString(q, 'type');
+    if (type) params.type = type;
+    if (wayShape) params.wayShape = wayShape;
+    if (tags.length > 0) params.tags = tags;
+    if (orTags.length > 0) params.orTags = orTags;
+    if (notTags.length > 0) params.notTags = notTags;
+    const limit = optionalNumber(q, 'limit');
+    if (limit != null && Number.isFinite(limit)) params.limit = Math.trunc(limit);
+    const minLengthM = optionalNumber(q, 'min_length_m');
+    if (minLengthM != null) params.minLengthM = minLengthM;
+    const maxLengthM = optionalNumber(q, 'max_length_m');
+    if (maxLengthM != null) params.maxLengthM = maxLengthM;
+    const minAreaM2 = optionalNumber(q, 'min_area_m2');
+    if (minAreaM2 != null) params.minAreaM2 = minAreaM2;
+    const maxAreaM2 = optionalNumber(q, 'max_area_m2');
+    if (maxAreaM2 != null) params.maxAreaM2 = maxAreaM2;
+    const disableBudgetWarning = optionalBoolean(q, 'disable_budget_warning');
+    if (disableBudgetWarning) params.disableBudgetWarning = true;
+    return params;
   }
 
   private async throwUpstreamError(upstream: globalThis.Response): Promise<never> {
@@ -874,6 +994,7 @@ export class OSMFeatures {
       zoom,
       location,
       radius,
+      within,
       osmIds,
       minLengthM,
       maxLengthM,
@@ -900,6 +1021,7 @@ export class OSMFeatures {
         zoom,
         location,
         radius,
+        within,
         osmIds,
         minLengthM,
         maxLengthM,
@@ -930,6 +1052,7 @@ export class OSMFeatures {
       zoom,
       location,
       radius,
+      within,
       osmIds,
       minLengthM,
       maxLengthM,
@@ -973,7 +1096,7 @@ export class OSMFeatures {
     const nowFn = dependencies.nowFn ?? Date.now;
     const featureCap = maxFeatures == null ? Number.POSITIVE_INFINITY : maxFeatures;
 
-    const tileBboxes = bbox ? splitBbox(bbox, bboxTiles) : [undefined];
+    const tileBboxes = within || !bbox ? [undefined] : splitBbox(bbox, bboxTiles);
     const allFeatures: unknown[] = [];
     let pageCount = 0;
     let lastPage: OSMGeoJSONResult | null = null;
@@ -995,6 +1118,7 @@ export class OSMFeatures {
       zoom,
       location,
       radius,
+      within,
       osmIds,
       minLengthM,
       maxLengthM,
@@ -1022,7 +1146,7 @@ export class OSMFeatures {
         let page: OSMGeoJSONResult;
         try {
           const raw = await this._rawQuery(
-            { ...baseParams, bbox: tileBbox, cursor },
+            { ...baseParams, bbox: within ? undefined : tileBbox, cursor },
             fetchFn,
             sleepFn,
             nowFn,
@@ -1100,6 +1224,41 @@ export class OSMFeatures {
     return resultFromFeatures(features, meta);
   }
 
+  /** Count features grouped by a tag key (``GET /v2/osm_features/stats``). */
+  async stats(
+    params: OSMFeaturesStatsParams,
+    dependencies: OSMFeaturesDependencies = {},
+  ): Promise<OSMStatsResponse> {
+    if (!params.groupBy) {
+      throw appError(400, 'invalid_group_by', 'group_by is required.');
+    }
+    const body = await this._getJson(
+      '/v2/osm_features/stats',
+      buildFeaturesQuery({
+        bbox: params.bbox,
+        tags: params.tags,
+        orTags: params.orTags,
+        notTags: params.notTags,
+        type: params.type,
+        wayShape: params.wayShape ?? params.shape,
+        limit: params.limit,
+        location: params.location,
+        radius: params.radius,
+        within: params.within,
+        groupBy: params.groupBy,
+        minLengthM: params.minLengthM,
+        maxLengthM: params.maxLengthM,
+        minAreaM2: params.minAreaM2,
+        maxAreaM2: params.maxAreaM2,
+        disableBudgetWarning: params.disableBudgetWarning,
+      }),
+      dependencies.fetchFn ?? fetch,
+      dependencies.sleepFn ?? sleep,
+      dependencies.nowFn ?? Date.now,
+    );
+    return body as OSMStatsResponse;
+  }
+
   /** Preflight credit cost (``GET /v2/osm_features/cost``). */
   async estimate_cost(
     params: OSMFeaturesParams = {},
@@ -1118,6 +1277,7 @@ export class OSMFeatures {
         zoom: params.zoom,
         location: params.location,
         radius: params.radius,
+        within: params.within,
         osmIds: params.osmIds,
         minLengthM: params.minLengthM,
         maxLengthM: params.maxLengthM,

@@ -214,6 +214,92 @@ async function main(): Promise<void> {
   assert.equal(radiusUrls[0]?.searchParams.get('around'), null);
   assert.equal(radiusUrls[0]?.searchParams.get('bbox'), null);
 
+  const withinUrls: URL[] = [];
+  await osmFeatures.query(
+    { within: 'relation/398021', type: 'node', tags: ['amenity'] },
+    {
+      fetchFn: async (input) => {
+        withinUrls.push(toUrl(input));
+        return geojsonPage([]);
+      },
+    },
+  );
+  assert.equal(withinUrls[0]?.searchParams.get('within'), 'relation/398021');
+  assert.equal(withinUrls[0]?.searchParams.get('bbox'), null);
+
+  const withinAllUrls: URL[] = [];
+  await osmFeatures.query_all(
+    { within: 'relation/398021', tags: ['amenity'], bboxTiles: 4, limitPerPage: 10 },
+    {
+      fetchFn: async (input) => {
+        withinAllUrls.push(toUrl(input));
+        return geojsonPage([]);
+      },
+    },
+  );
+  assert.equal(withinAllUrls.length, 1);
+  assert.equal(withinAllUrls[0]?.searchParams.get('within'), 'relation/398021');
+  assert.equal(withinAllUrls[0]?.searchParams.get('bbox'), null);
+
+  const statsResolved = osmFeatures.resolveStatsRequest(
+    new URLSearchParams('within=relation/398021&tags=amenity&tags=building&group_by=amenity&limit=20'),
+  );
+  assert.equal(statsResolved.groupBy, 'amenity');
+  assert.equal(statsResolved.within, 'relation/398021');
+  assert.deepEqual(statsResolved.tags, ['amenity', 'building']);
+  assert.equal(statsResolved.limit, 20);
+
+  await assert.rejects(
+    async () => osmFeatures.resolveStatsRequest({ bbox: '18.06,59.32,18.09,59.34' }),
+    (error: unknown) => {
+      const appError = error as AppError;
+      assert.equal(appError.status, 400);
+      assert.equal(appError.code, 'invalid_group_by');
+      return true;
+    },
+  );
+
+  const statsUrls: URL[] = [];
+  const statsOut = await osmFeatures.stats(
+    { groupBy: 'amenity', bbox: '18.06,59.32,18.09,59.34', tags: ['amenity'], type: 'node' },
+    {
+      fetchFn: async (input) => {
+        statsUrls.push(toUrl(input));
+        return new Response(
+          JSON.stringify({
+            groups: [{ value: 'cafe', count: 12 }],
+            total: 12,
+            truncated: false,
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      },
+    },
+  );
+  assert.equal(statsOut.total, 12);
+  assert.equal(statsOut.groups[0]?.value, 'cafe');
+  assert.equal(statsUrls[0]?.pathname, '/v2/osm_features/stats');
+  assert.equal(statsUrls[0]?.searchParams.get('group_by'), 'amenity');
+  assert.deepEqual(statsUrls[0]?.searchParams.getAll('tags'), ['amenity']);
+  assert.equal(statsUrls[0]?.searchParams.get('bbox'), '18.06,59.32,18.09,59.34');
+  assert.equal(statsUrls[0]?.searchParams.get('type'), 'node');
+
+  const statsWithinUrls: URL[] = [];
+  await osmFeatures.stats(
+    { groupBy: 'amenity', within: 'relation/398021', tags: ['amenity'] },
+    {
+      fetchFn: async (input) => {
+        statsWithinUrls.push(toUrl(input));
+        return new Response(
+          JSON.stringify({ groups: [], total: 0, truncated: false }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      },
+    },
+  );
+  assert.equal(statsWithinUrls[0]?.searchParams.get('within'), 'relation/398021');
+  assert.equal(statsWithinUrls[0]?.searchParams.get('bbox'), null);
+
   const noMinAreaRequest = osmFeatures.resolveRequest({ zoom: '11', limit: '1' }, buildingsLayer);
   const noMinAreaUrls: URL[] = [];
   await osmFeatures.query(noMinAreaRequest, {

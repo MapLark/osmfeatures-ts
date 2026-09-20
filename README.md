@@ -10,6 +10,7 @@ The backend is dedicated PostGIS, not the public Overpass endpoint, with API key
 - [Functions and Parameters](#functions-and-parameters)
   - [query()](#query)
   - [query_all](#query_all)
+  - [stats](#stats)
   - [estimate_cost](#estimate_cost)
   - [usage](#usage)
 - [Places and routes](#places-and-routes)
@@ -88,6 +89,7 @@ The geographical area for the request in terms of GPS coordinates or specific OS
 | `bbox`   | `string` | Bounding box as `min_lon,min_lat,max_lon,max_lat`. |
 | `location` | `string` | Point for a radius search as `lat,lng`. Requires `radius`. |
 | `radius` | `number` | Search radius in metres. Requires `location`. |
+| `within` | `string` | Polygon spatial anchor as `way/<id>` or `relation/<id>`. Mutually exclusive with `bbox` / `location`. |
 | `osmIds` | `string` | Comma-separated OSM IDs to fetch by id.            |
 
 
@@ -161,7 +163,7 @@ Fields for pagination and usage.
 
 Auto-paginates (and optionally tiles the bbox) until the result is complete or a client-side cap is hit. GeoJSON only — for FlatGeobuf / other encodings, use `query` with `accept`.
 
-Does not take `limit` or `cursor`; paging is handled internally.
+Does not take `limit` or `cursor`; paging is handled internally. Does not tile when `within` is set (`bboxTiles` is ignored).
 
 ```ts
 const all = await client.query_all({
@@ -181,7 +183,7 @@ console.log(all.meta.page_count, all.meta.has_more, all.meta.units_charged);
 
 ### Params
 
-Same filter params as `query` (`bbox`, `tags`, `orTags`, `notTags`, `type`, `wayShape`, `zoom`, `location`, `radius`, `osmIds`, `minLengthM`, `maxLengthM`, `minAreaM2`, `maxAreaM2`, `centroid`, `clipGeometry`, `disableBudgetWarning`), plus:
+Same filter params as `query` (`bbox`, `tags`, `orTags`, `notTags`, `type`, `wayShape`, `zoom`, `location`, `radius`, `within`, `osmIds`, `minLengthM`, `maxLengthM`, `minAreaM2`, `maxAreaM2`, `centroid`, `clipGeometry`, `disableBudgetWarning`), plus:
 
 
 | Param          | Type            | Default                | Description                                                                                                                                               |
@@ -213,6 +215,30 @@ Same fields as `query`, plus:
 Also exports layer presets (`resolveLayerFromQuery`, `OSM_FEATURES_LAYER_PRESETS`, ...),
 GeoJSON payload helpers (`featureCentroid`, `geometryBounds`, `parseFeatureId`, ...),
 and local helpers (`nearest_within`, `point_in_geometry`, `isOpenNow`).
+
+## `stats`
+
+Count features grouped by a tag key via `GET /v2/osm_features/stats`. Returns `{ groups, total, truncated }`. Spatial windows are larger than `query` (country-scale on every tier) and billed count-only. `limit` is max histogram buckets (API default 100), not a scan cap. `groupBy` is required. Same tag filters as `query`; no `osmIds`, `cursor`, `zoom`, `centroid`, or `clipGeometry`. Map Express/query strings with `resolveStatsRequest` (requires `group_by`).
+
+```ts
+const histogram = await client.stats({
+  groupBy: 'amenity',
+  bbox: '18.05,59.32,18.10,59.34',
+  type: 'node',
+  tags: ['amenity'],
+});
+console.log(histogram.total, histogram.groups);
+```
+
+City boundary:
+
+```ts
+const mix = await client.stats({
+  groupBy: 'amenity',
+  within: 'relation/398021',
+  tags: ['amenity'],
+});
+```
 
 ## `estimate_cost`
 
