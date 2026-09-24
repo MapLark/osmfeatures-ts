@@ -57,7 +57,7 @@ function lonLat(feat: unknown): [number, number] {
 /**
  * Nearest secondary for each primary, within `maxDistanceM`.
  *
- * Accepts a FeatureCollection, a `{ data, meta }` `query` / `query_all` result,
+ * Accepts a FeatureCollection, a `{ data, meta }` `query` result,
  * or a list of Features. Point comes from `geometry` when it is a Point, else
  * `properties.centroid` (same rules as `featureCentroid`). A feature with
  * neither throws.
@@ -101,7 +101,7 @@ export function nearest_within(
     throw new Error(
       `nearest_within join is ${n}×${m} comparisons `
       + `(cap ${maxComparisons}). Shrink the collections `
-      + '(places_search/nearby limit, not query_all).',
+      + '(places_search/nearby limit, not a large query()).',
     );
   }
 

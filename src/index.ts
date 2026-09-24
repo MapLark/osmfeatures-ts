@@ -8,32 +8,28 @@ type AppError = Error & {
   upstreamDetail?: string;
 };
 
-/** Response metadata from headers (not part of GeoJSON body). */
+/** Response metadata (not part of GeoJSON body). */
 export type OSMFeaturesMeta = {
   returned: number;
+  /** True when the tile was truncated, or the client trimmed to ``maxFeatures``. */
   has_more: boolean;
-  next_cursor: string | null;
   /** From ``X-Usage-Units-Charged`` when present (authenticated API). */
   units_charged?: number;
-  /** Set by ``query_all`` only (pages fetched). */
-  page_count?: number;
-  relay_partial?: boolean;
-  relay_partial_reason?: string;
 };
 
-/** Wire GeoJSON FeatureCollection (no pagination fields). */
+/** Wire GeoJSON FeatureCollection. */
 export type OSMGeoJSONPayload = {
   type: 'FeatureCollection';
   features: unknown[];
 };
 
-/** GeoJSON page: FeatureCollection body + header-derived meta. */
+/** GeoJSON FeatureCollection body + client meta. */
 export type OSMGeoJSONResult = {
   data: OSMGeoJSONPayload;
   meta: OSMFeaturesMeta;
 };
 
-/** Any Accept: GeoJSON page, or raw bytes in ``data`` for binary encodings. */
+/** GeoJSON FeatureCollection, or raw bytes in ``data`` for binary encodings. */
 export type OSMFeaturesResult = {
   data: OSMGeoJSONPayload | ArrayBuffer;
   meta: OSMFeaturesMeta;
@@ -52,13 +48,11 @@ function resultFromFeatures(
 function metaFromHeaders(headers: Headers, featureCount: number): OSMFeaturesMeta {
   const returnedRaw = headers.get('X-Returned');
   const parsed = returnedRaw != null && returnedRaw !== '' ? Number.parseInt(returnedRaw, 10) : Number.NaN;
-  const nextCursor = headers.get('X-Next-Cursor');
   const unitsRaw = headers.get('X-Usage-Units-Charged');
   const unitsParsed = unitsRaw != null && unitsRaw !== '' ? Number(unitsRaw) : Number.NaN;
   const meta: OSMFeaturesMeta = {
     returned: Number.isFinite(parsed) ? parsed : featureCount,
-    has_more: (headers.get('X-Has-More') || 'false').toLowerCase() === 'true',
-    next_cursor: nextCursor && nextCursor.length > 0 ? nextCursor : null,
+    has_more: (headers.get('X-Has-More') ?? '').trim().toLowerCase() === 'true',
   };
   if (Number.isFinite(unitsParsed)) {
     meta.units_charged = unitsParsed;
@@ -80,9 +74,6 @@ export type OSMFeaturesLayer = {
 
 /** Flat query params (same idea as Python `query(**params)`). */
 export type OSMFeaturesParams = OSMFeaturesLayer & {
-  /** Page size. Omit to use the API default (1000). Max `6000`. */
-  limit?: number;
-  cursor?: string;
   zoom?: number;
   /** Point for a radius search as `lat,lng`. Requires `radius`. */
   location?: string;
@@ -95,6 +86,7 @@ export type OSMFeaturesParams = OSMFeaturesLayer & {
   maxLengthM?: number;
   minAreaM2?: number;
   maxAreaM2?: number;
+  /** Count-only (`splitUntilFit`). Not sent on `/v3/osm_features`. */
   disableBudgetWarning?: boolean;
   /** When true, include `properties.centroid` on non-point features. Omit for the API default (false). */
   centroid?: boolean;
@@ -102,10 +94,20 @@ export type OSMFeaturesParams = OSMFeaturesLayer & {
   clipGeometry?: boolean;
   /** Accept media type. Default application/geo+json; other types put bytes in ``data``. */
   accept?: string;
+  /** Split the bbox into this many tiles (power of 2). Default 1. */
+  bboxTiles?: number;
+  /** Count matches first, then fetch. Quarter until each piece fits. */
+  splitUntilFit?: boolean;
+  /** Cap on merged features. Default 1_000_000. `null` = no cap. */
+  maxFeatures?: number | null;
+  /** Wall-clock seconds for this call. Default 60. `null` = no cap. */
+  timeout?: number | null;
+  /** Maximum features in the response. Omit for the key's max_limit. Client max 1000000. The API rejects above the key's max_limit. */
+  limit?: number;
 };
 
-/** `GET /v2/osm_features/stats`. Same filters as `query` except paging/geometry extras. */
-export type OSMFeaturesStatsParams = {
+/** `GET /v2/osm_features/count`. Same filters as `query` except geometry extras. */
+export type OSMFeaturesCountParams = {
   /** Tag key to group on (required). Features without this key are not counted. */
   groupBy: string;
   bbox?: string;
@@ -128,10 +130,10 @@ export type OSMFeaturesStatsParams = {
   disableBudgetWarning?: boolean;
 };
 
-export type OSMStatsGroup = { value: string; count: number };
+export type OSMCountGroup = { value: string; count: number };
 
-export type OSMStatsResponse = {
-  groups: OSMStatsGroup[];
+export type OSMCountResponse = {
+  groups: OSMCountGroup[];
   total: number;
   truncated: boolean;
 };
@@ -247,8 +249,27 @@ type OSMFeaturesDependencies = {
 };
 
 const DEFAULT_BASE_URL = 'https://api.maplark.com';
-const MAX_LIMIT = 6000;
+const V3_PATH = '/v3/osm_features';
+// splitUntilFit when the caller omitted limit. Free max_limit; paid keys allow more.
+const V3_SPLIT_WHEN_LIMIT_OMITTED = 100_000;
+// Enterprise TIER_LIMITS max_limit. The API rejects limit_exceeds_tier above the key.
+const V3_MAX_LIMIT = 1_000_000;
+
+function resolveQueryLimit(limit: number | undefined): number | undefined {
+  if (limit == null) {
+    return undefined;
+  }
+  if (!Number.isInteger(limit) || limit < 1 || limit > V3_MAX_LIMIT) {
+    throw appError(400, 'invalid_limit', `limit must be an integer from 1 to ${V3_MAX_LIMIT}`);
+  }
+  return limit;
+}
+const DEFAULT_MAX_FEATURES = 1_000_000;
+const V3_SPLIT_DEPTH = 6;
+const DEFAULT_QUERY_TIMEOUT_S = 60;
 const GEOJSON_ACCEPT = 'application/geo+json';
+// Same keys /v2/osm_features/count refuses as group_by.
+const COUNT_UNBOUNDED_KEYS = new Set(['name', 'ref', 'addr:housenumber']);
 
 function isGeojsonAccept(accept: string | undefined): boolean {
   if (accept == null || accept.trim() === '') {
@@ -350,23 +371,37 @@ function asQueryMap(query: OSMFeaturesQuery | URLSearchParams): OSMFeaturesQuery
   return query instanceof URLSearchParams ? queryFromSearchParams(query) : query;
 }
 
-function parseLimit(query: OSMFeaturesQuery): number | undefined {
-  const raw = optionalString(query, 'limit');
-  if (raw == null) {
-    return undefined;
+function isResultTooLarge(error: unknown): boolean {
+  const err = error as AppError;
+  if (err.status !== 400) {
+    return false;
   }
-  const parsed = Number.parseInt(raw, 10);
-  if (!Number.isFinite(parsed)) {
-    return undefined;
-  }
-  if (parsed > MAX_LIMIT) {
-    throw appError(400, 'invalid_limit', `limit must be <= ${MAX_LIMIT}.`);
-  }
-  return parsed;
+  const detail = `${err.upstreamDetail ?? ''} ${err.message ?? ''} ${err.subtype ?? ''}`;
+  return detail.includes('result_too_large');
 }
 
-/** Parse `bbox_tiles` from a query map for `query_all` (client-side only). */
-export function resolveBboxTiles(query: OSMFeaturesQuery = {}, fallback: number = 2): number {
+function countGroupKey(tags: string[] | undefined): string | null {
+  if (tags == null || tags.length === 0) {
+    return null;
+  }
+  const item = String(tags[0]);
+  let key = item;
+  for (const op of ['>=', '<=', '>', '<', '=']) {
+    const idx = item.indexOf(op);
+    if (idx >= 0) {
+      key = item.slice(0, idx);
+      break;
+    }
+  }
+  key = key.trim();
+  if (!key || COUNT_UNBOUNDED_KEYS.has(key)) {
+    return null;
+  }
+  return key;
+}
+
+/** Parse `bbox_tiles` from a query map for `query` (client-side only). */
+export function resolveBboxTiles(query: OSMFeaturesQuery = {}, fallback: number = 1): number {
   const raw = optionalString(query, 'bbox_tiles');
   if (raw == null) {
     return fallback;
@@ -423,8 +458,8 @@ export function splitBbox(bbox: string, tileCount: number): string[] {
 
 type RawQueryParams = {
   bbox?: string;
+  /** v3 tile size (omit for API default, max 1000000) or count histogram bucket cap. */
   limit?: number;
-  cursor?: string;
   zoom?: number;
   location?: string;
   radius?: number;
@@ -455,9 +490,6 @@ function buildFeaturesQuery(params: RawQueryParams): URLSearchParams {
   }
   if (params.limit != null) {
     query.set('limit', String(params.limit));
-  }
-  if (params.cursor) {
-    query.set('cursor', params.cursor);
   }
   if (params.zoom != null) {
     query.set('zoom', String(params.zoom));
@@ -741,8 +773,6 @@ export class OSMFeatures {
   resolveRequest(query: OSMFeaturesQuery, layer: OSMFeaturesLayer): OSMFeaturesParams {
     return {
       ...layer,
-      limit: parseLimit(query),
-      cursor: optionalString(query, 'cursor'),
       zoom: optionalNumber(query, 'zoom'),
       location: optionalString(query, 'location'),
       radius: optionalNumber(query, 'radius'),
@@ -758,8 +788,8 @@ export class OSMFeatures {
     };
   }
 
-  /** Map Express/query params into `stats` params. `group_by` is required. */
-  resolveStatsRequest(query: OSMFeaturesQuery | URLSearchParams): OSMFeaturesStatsParams {
+  /** Map Express/query params into `count` params. `group_by` is required. */
+  resolveCountRequest(query: OSMFeaturesQuery | URLSearchParams): OSMFeaturesCountParams {
     const q = asQueryMap(query);
     const groupBy = optionalString(q, 'group_by');
     if (groupBy == null) {
@@ -773,7 +803,7 @@ export class OSMFeatures {
       wayShapeRaw === 'line' || wayShapeRaw === 'polygon' || wayShapeRaw === 'all'
         ? wayShapeRaw
         : undefined;
-    const params: OSMFeaturesStatsParams = { groupBy };
+    const params: OSMFeaturesCountParams = { groupBy };
     const bbox = optionalString(q, 'bbox');
     if (bbox) params.bbox = bbox;
     const within = optionalString(q, 'within');
@@ -943,7 +973,7 @@ export class OSMFeatures {
     nowFn: () => number,
   ): Promise<OSMFeaturesResult> {
     const query = buildFeaturesQuery(params);
-    const upstreamUrl = new URL(`${this.apiBaseUrl}/v2/osm_features`);
+    const upstreamUrl = new URL(`${this.apiBaseUrl}${V3_PATH}`);
     for (const [key, value] of query.entries()) {
       upstreamUrl.searchParams.append(key, value);
     }
@@ -979,69 +1009,20 @@ export class OSMFeatures {
     };
   }
 
-  /** Single upstream page. Params map 1:1 to server query string (no tiling). */
+  /**
+   * One ``/v3/osm_features`` call for a tile that fits in ``limit`` features.
+   *
+   * Omit ``limit`` for the key's ``max_limit``. A lower ``limit`` truncates
+   * (``meta.has_more``). A match set larger than the caller's ``max_limit``
+   * is HTTP 400 ``result_too_large``. ``splitUntilFit: true`` counts first
+   * and quarters the bbox before that fetch. ``within``, radius, and
+   * ``osmIds`` cannot be split, so the API error propagates.
+   */
   async query(
-    {
-      bbox,
-      tags,
-      orTags,
-      notTags,
-      type,
-      wayShape,
-      shape,
-      limit,
-      cursor,
-      zoom,
-      location,
-      radius,
-      within,
-      osmIds,
-      minLengthM,
-      maxLengthM,
-      minAreaM2,
-      maxAreaM2,
-      disableBudgetWarning,
-      centroid,
-      clipGeometry,
-      accept,
-    }: OSMFeaturesParams,
+    params: OSMFeaturesParams,
     dependencies: OSMFeaturesDependencies = {},
   ): Promise<OSMFeaturesResult> {
-    const payload = await this._rawQuery(
-      {
-        bbox,
-        tags,
-        orTags,
-        notTags,
-        type,
-        wayShape,
-        shape,
-        limit,
-        cursor,
-        zoom,
-        location,
-        radius,
-        within,
-        osmIds,
-        minLengthM,
-        maxLengthM,
-        minAreaM2,
-        maxAreaM2,
-        disableBudgetWarning,
-        centroid,
-        clipGeometry,
-        accept,
-      },
-      dependencies.fetchFn ?? fetch,
-      dependencies.sleepFn ?? sleep,
-      dependencies.nowFn ?? Date.now,
-    );
-    return payload;
-  }
-
-  /** Auto-paginate (and optionally tile) until complete. Each page uses `_rawQuery`. */
-  async query_all(
-    {
+    const {
       bbox,
       tags,
       orTags,
@@ -1062,59 +1043,25 @@ export class OSMFeatures {
       centroid,
       clipGeometry,
       accept,
-      limitPerPage,
-      bboxTiles = 2,
-      maxPages = 15,
-      maxFeatures = 55_000,
-    }: Omit<OSMFeaturesParams, 'limit' | 'cursor'> & {
-      /** Upstream `limit` per HTTP request (page size). Omit to use the API default (1000). */
-      limitPerPage?: number;
-      bboxTiles?: number;
-      maxPages?: number;
-      /** Cap on merged features. `null` = no cap. */
-      maxFeatures?: number | null;
-    },
-    dependencies: OSMFeaturesDependencies = {},
-  ): Promise<OSMGeoJSONResult> {
-    if (!isGeojsonAccept(accept)) {
-      throw appError(
-        400,
-        'invalid_accept',
-        'query_all only supports GeoJSON; use query({ accept }) for binary encodings.',
-      );
-    }
-    if (!isPowerOfTwo(bboxTiles)) {
-      throw appError(
-        400,
-        'invalid_bbox_tiles',
-        'bbox_tiles must be a power of 2 (1, 2, 4, 8, …).',
-      );
-    }
+      bboxTiles = 1,
+      splitUntilFit = false,
+      maxFeatures = DEFAULT_MAX_FEATURES,
+      timeout = DEFAULT_QUERY_TIMEOUT_S,
+      limit,
+    } = params;
+    const tileLimit = resolveQueryLimit(limit);
+    let apiTruncated = false;
 
     const fetchFn = dependencies.fetchFn ?? fetch;
     const sleepFn = dependencies.sleepFn ?? sleep;
     const nowFn = dependencies.nowFn ?? Date.now;
-    const featureCap = maxFeatures == null ? Number.POSITIVE_INFINITY : maxFeatures;
-
-    const tileBboxes = within || !bbox ? [undefined] : splitBbox(bbox, bboxTiles);
-    const allFeatures: unknown[] = [];
-    let pageCount = 0;
-    let lastPage: OSMGeoJSONResult | null = null;
-    let relayPartialReason: string | null = null;
-    let lastCursor: string | null = null;
-    let unitsCharged = 0;
-    let sawUnitsCharged = false;
-    // Cap / maxPages stop is intentional; this flag only marks result incomplete.
-    let stoppedEarly = false;
-
-    const baseParams = {
+    const filterParams: RawQueryParams = {
       tags,
       orTags,
       notTags,
       type,
       wayShape,
       shape,
-      limit: limitPerPage,
       zoom,
       location,
       radius,
@@ -1124,116 +1071,199 @@ export class OSMFeatures {
       maxLengthM,
       minAreaM2,
       maxAreaM2,
-      disableBudgetWarning,
       centroid,
       clipGeometry,
+      accept,
     };
 
-    for (const tileBbox of tileBboxes) {
-      if (allFeatures.length >= featureCap) {
-        stoppedEarly = true;
-        break;
+    if (!isGeojsonAccept(accept)) {
+      if (splitUntilFit) {
+        throw appError(400, 'invalid_accept', 'splitUntilFit only works with GeoJSON');
       }
-      if (relayPartialReason !== null) {
-        break;
+      if (bboxTiles !== 1) {
+        throw appError(400, 'invalid_bbox_tiles', 'bboxTiles only works with GeoJSON');
       }
-
-      let cursor: string | undefined;
-      let tilePages = 0;
-      let tileExhausted = false;
-
-      while (tilePages < maxPages && allFeatures.length < featureCap) {
-        let page: OSMGeoJSONResult;
-        try {
-          const raw = await this._rawQuery(
-            { ...baseParams, bbox: within ? undefined : tileBbox, cursor },
-            fetchFn,
-            sleepFn,
-            nowFn,
-          );
-          if (raw.data instanceof ArrayBuffer) {
-            throw appError(
-              400,
-              'invalid_accept',
-              'query_all only supports GeoJSON; use query({ accept }) for binary encodings.',
-            );
-          }
-          page = { data: raw.data, meta: raw.meta };
-        } catch (error) {
-          const status = (error as AppError).status;
-          if (pageCount > 0 && (status === 400 || status === 429)) {
-            relayPartialReason = status === 400
-              ? 'upstream_rejected_cursor'
-              : 'upstream_rate_limited_after_retries';
-            break;
-          }
-          throw error;
-        }
-
-        const pageFeatures = Array.isArray(page.data.features)
-          ? page.data.features
-          : [];
-        allFeatures.push(...pageFeatures);
-        lastPage = page;
-        pageCount += 1;
-        tilePages += 1;
-        if (page.meta.units_charged != null) {
-          unitsCharged += page.meta.units_charged;
-          sawUnitsCharged = true;
-        }
-
-        const hasMore = page.meta.has_more;
-        const nextCursor = page.meta.next_cursor;
-        if (!hasMore || typeof nextCursor !== 'string' || nextCursor === '') {
-          lastCursor = typeof nextCursor === 'string' ? nextCursor : null;
-          tileExhausted = true;
-          break;
-        }
-
-        cursor = nextCursor;
-        lastCursor = nextCursor;
-      }
-
-      if (relayPartialReason !== null) {
-        break;
-      }
-      if (!tileExhausted) {
-        stoppedEarly = true;
-        if (allFeatures.length >= featureCap) {
-          break;
-        }
-      }
+      const binary = await this._rawQuery(
+        { ...filterParams, bbox, limit: tileLimit },
+        fetchFn,
+        sleepFn,
+        nowFn,
+      );
+      return binary;
     }
 
-    const uniqueFeatures = dedupeFeatures(allFeatures);
-    const truncated = Number.isFinite(featureCap) && uniqueFeatures.length > featureCap;
-    const features = truncated ? uniqueFeatures.slice(0, featureCap) : uniqueFeatures;
-    const incomplete = truncated || stoppedEarly;
-
-    const meta: OSMFeaturesMeta = {
-      returned: features.length,
-      page_count: pageCount,
-      has_more: incomplete || Boolean(lastPage?.meta.has_more) || relayPartialReason !== null,
-      next_cursor: incomplete ? lastCursor : (lastPage?.meta.next_cursor ?? null),
-      relay_partial: relayPartialReason !== null,
-      relay_partial_reason: relayPartialReason ?? undefined,
+    const deadline = timeout == null ? null : nowFn() + timeout * 1000;
+    const checkDeadline = (): void => {
+      if (deadline != null && nowFn() >= deadline) {
+        throw appError(408, 'query_timeout', `query exceeded ${timeout}s timeout`);
+      }
     };
-    if (sawUnitsCharged) {
-      meta.units_charged = unitsCharged;
+
+    const queryTile = async (tile: string | undefined): Promise<unknown[] | null> => {
+      try {
+        const raw = await this._rawQuery(
+          { ...filterParams, bbox: tile, limit: tileLimit },
+          fetchFn,
+          sleepFn,
+          nowFn,
+        );
+        if (raw.data instanceof ArrayBuffer) {
+          throw appError(400, 'invalid_accept', 'query expected GeoJSON');
+        }
+        if (raw.meta.has_more) {
+          apiTruncated = true;
+        }
+        return Array.isArray(raw.data.features) ? raw.data.features : [];
+      } catch (error) {
+        if (isResultTooLarge(error) && splitUntilFit) {
+          return null;
+        }
+        throw error;
+      }
+    };
+
+    if (typeof bbox !== 'string') {
+      if (bboxTiles !== 1) {
+        throw appError(400, 'invalid_bbox_tiles', 'bboxTiles requires bbox');
+      }
+      const raw = await this._rawQuery(
+        { ...filterParams, limit: tileLimit },
+        fetchFn,
+        sleepFn,
+        nowFn,
+      );
+      if (raw.data instanceof ArrayBuffer) {
+        throw appError(400, 'invalid_accept', 'query expected GeoJSON');
+      }
+      let features = Array.isArray(raw.data.features) ? raw.data.features : [];
+      let truncated = raw.meta.has_more;
+      if (maxFeatures != null && features.length > maxFeatures) {
+        features = features.slice(0, maxFeatures);
+        truncated = true;
+      }
+      const meta: OSMFeaturesMeta = {
+        returned: features.length,
+        has_more: truncated,
+      };
+      if (raw.meta.units_charged != null) {
+        meta.units_charged = raw.meta.units_charged;
+      }
+      return resultFromFeatures(features, meta);
     }
-    return resultFromFeatures(features, meta);
+
+    const matchCount = async (tile: string): Promise<number | null> => {
+      const key = countGroupKey(tags);
+      if (key == null) {
+        return null;
+      }
+      const stat: OSMFeaturesCountParams = { groupBy: key, bbox: tile, limit: 1 };
+      if (location != null) stat.location = location;
+      if (radius != null) stat.radius = radius;
+      if (type != null) stat.type = type;
+      if (within != null) stat.within = within;
+      if (tags != null) stat.tags = tags;
+      if (orTags != null) stat.orTags = orTags;
+      if (notTags != null) stat.notTags = notTags;
+      if (minLengthM != null) stat.minLengthM = minLengthM;
+      if (maxLengthM != null) stat.maxLengthM = maxLengthM;
+      if (minAreaM2 != null) stat.minAreaM2 = minAreaM2;
+      if (maxAreaM2 != null) stat.maxAreaM2 = maxAreaM2;
+      const way = wayShape ?? shape;
+      if (way != null) stat.wayShape = way;
+      if (disableBudgetWarning) stat.disableBudgetWarning = true;
+      const body = await this.count(stat, { fetchFn, sleepFn, nowFn });
+      return Number(body.total);
+    };
+
+    const tiles: Array<[string, number]> = splitBbox(bbox, bboxTiles).map((tile) => [tile, 0]);
+    const featureLists: unknown[][] = [];
+    let count = 0;
+    let truncated = false;
+    let started = false;
+    const tileCap = tileLimit ?? V3_SPLIT_WHEN_LIMIT_OMITTED;
+
+    const enqueueQuarters = (tile: string, depth: number): void => {
+      if (depth >= V3_SPLIT_DEPTH) {
+        throw new Error(`query tile still overflows after ${V3_SPLIT_DEPTH} splits: ${tile}`);
+      }
+      for (const quarter of splitBbox(tile, 4)) {
+        tiles.push([quarter, depth + 1]);
+      }
+    };
+
+    while (tiles.length > 0) {
+      if (started) {
+        checkDeadline();
+      }
+      started = true;
+      if (maxFeatures != null && count >= maxFeatures) {
+        truncated = true;
+        break;
+      }
+      const next = tiles.shift();
+      if (next == null) {
+        break;
+      }
+      const [tile, depth] = next;
+      if (splitUntilFit) {
+        const total = await matchCount(tile);
+        if (total != null && total > tileCap) {
+          enqueueQuarters(tile, depth);
+          continue;
+        }
+        if (total === 0) {
+          continue;
+        }
+      }
+      const tileFeatures = await queryTile(tile);
+      if (tileFeatures == null) {
+        enqueueQuarters(tile, depth);
+        continue;
+      }
+      if (maxFeatures != null) {
+        const room = maxFeatures - count;
+        if (tileFeatures.length > room) {
+          if (room > 0) {
+            featureLists.push(tileFeatures.slice(0, room));
+          }
+          count += Math.max(room, 0);
+          truncated = true;
+          break;
+        }
+      }
+      featureLists.push(tileFeatures);
+      count += tileFeatures.length;
+    }
+
+    let allFeatures = dedupeFeatures(featureLists.flat());
+    if (maxFeatures != null && allFeatures.length > maxFeatures) {
+      allFeatures = allFeatures.slice(0, maxFeatures);
+      truncated = true;
+    }
+    return resultFromFeatures(allFeatures, {
+      returned: allFeatures.length,
+      has_more: truncated || apiTruncated,
+    });
   }
 
-  /** Count features grouped by a tag key (``GET /v2/osm_features/stats``). */
-  async stats(
-    params: OSMFeaturesStatsParams,
+  /** Same as ``query``. */
+  async query_all(
+    params: OSMFeaturesParams,
     dependencies: OSMFeaturesDependencies = {},
-  ): Promise<OSMStatsResponse> {
+  ): Promise<OSMFeaturesResult> {
+    return this.query(params, dependencies);
+  }
+
+  /** Count features grouped by a tag key (``GET /v2/osm_features/count``). */
+  async count(
+    params: OSMFeaturesCountParams,
+    dependencies: OSMFeaturesDependencies = {},
+  ): Promise<OSMCountResponse> {
     if (!params.groupBy) {
       throw appError(400, 'invalid_group_by', 'group_by is required.');
     }
     const body = await this._getJson(
-      '/v2/osm_features/stats',
+      '/v2/osm_features/count',
       buildFeaturesQuery({
         bbox: params.bbox,
         tags: params.tags,
@@ -1256,41 +1286,7 @@ export class OSMFeatures {
       dependencies.sleepFn ?? sleep,
       dependencies.nowFn ?? Date.now,
     );
-    return body as OSMStatsResponse;
-  }
-
-  /** Preflight credit cost (``GET /v2/osm_features/cost``). */
-  async estimate_cost(
-    params: OSMFeaturesParams = {},
-    dependencies: OSMFeaturesDependencies = {},
-  ): Promise<Record<string, unknown>> {
-    return this._getJson(
-      '/v2/osm_features/cost',
-      buildFeaturesQuery({
-        bbox: params.bbox,
-        tags: params.tags,
-        orTags: params.orTags,
-        notTags: params.notTags,
-        type: params.type,
-        wayShape: params.wayShape ?? params.shape,
-        limit: params.limit,
-        zoom: params.zoom,
-        location: params.location,
-        radius: params.radius,
-        within: params.within,
-        osmIds: params.osmIds,
-        minLengthM: params.minLengthM,
-        maxLengthM: params.maxLengthM,
-        minAreaM2: params.minAreaM2,
-        maxAreaM2: params.maxAreaM2,
-        disableBudgetWarning: params.disableBudgetWarning,
-        centroid: params.centroid,
-        clipGeometry: params.clipGeometry,
-      }),
-      dependencies.fetchFn ?? fetch,
-      dependencies.sleepFn ?? sleep,
-      dependencies.nowFn ?? Date.now,
-    );
+    return body as OSMCountResponse;
   }
 
   /** This month's unit-budget usage (``GET /v1/usage``). */

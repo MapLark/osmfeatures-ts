@@ -1,6 +1,6 @@
 {
   "name": "osmfeatures",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Get OpenStreetMap features such as buildings, roads, or points of interest from dedicated servers with a single API call in GeoJSON, FlatGeobuf, Geoparquet, and CSV formats.",
   "type": "module",
   "main": "./dist/index.js",

@@ -9,9 +9,8 @@ The backend is dedicated PostGIS, not the public Overpass endpoint, with API key
 - [Quick start](#quick-start)
 - [Functions and Parameters](#functions-and-parameters)
   - [query()](#query)
-  - [query_all](#query_all)
-  - [stats](#stats)
-  - [estimate_cost](#estimate_cost)
+  - [Query a large bbox](#query-a-large-bbox)
+  - [count](#count)
   - [usage](#usage)
 - [Places and routes](#places-and-routes)
   - [Places search](#places-search)
@@ -56,9 +55,6 @@ const page = await client.query({
 // Get GeoJSON FeatureCollection
 console.log(page.data.features.length);
 
-// Header meta for paging + usage
-console.log(page.meta.has_more, page.meta.next_cursor, page.meta.units_charged);
-
 // Binary / table encodings via Accept param
 const fgb = await client.query({
   bbox: '18.06,59.32,18.09,59.34',
@@ -66,7 +62,6 @@ const fgb = await client.query({
   accept: 'application/flatgeobuf',
 });
 console.log(fgb.data);
-console.log(fgb.meta.has_more, fgb.meta.next_cursor);
 ```
 
 Talks to `https://api.maplark.com` by default.
@@ -77,7 +72,9 @@ Talks to `https://api.maplark.com` by default.
 
 ## `query()`
 
-Fetches a single page from the API. Returns `{ data, meta }` where `data` is a GeoJSON FeatureCollection (default) or an `ArrayBuffer` for binary encodings.
+`query()` calls `GET /v3/osm_features` and returns the whole tile. Returns `{ data, meta }` where `data` is a GeoJSON FeatureCollection (default) or an `ArrayBuffer` for binary encodings.
+
+Omit `limit` for the API default. Paid keys may raise `limit` up to their `max_limit` (enterprise 1000000). A larger match set is truncated (`X-Has-More: true`). Pass `splitUntilFit: true` to quarter the bbox until each piece fits. That adds latency. Pass `bboxTiles: 2` (or 4, 8, ...) to split the bbox up front. `query` does not take `cursor`.
 
 #### Spatial anchors (required)
 
@@ -130,15 +127,16 @@ Geometric filters such specific OSM element type, min length, or including centr
 
 #### Other
 
-Extra filters to for pagination, output format (accept), 
+Output format, tiling, and budget. 
 
 
 | Param                  | Type      | Default                | Description                                                                                                                                                               |
 | ---------------------- | --------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `accept`               | `string`  | `application/geo+json` | Response media type in header. Options - `application/geo+json`, `text/csv`, `text/tab-separated-values`, `application/flatgeobuf`, and `application/vnd.apache.parquet`. |
-| `limit`                | `number`  | API `1000`             | Page size. Omit to use the API default. Max `6000`.                                                                                                       |
-| `cursor`               | `string`  |                        | Pagination cursor from a previous `meta.next_cursor`.                                                                                                                     |
-| `disableBudgetWarning` | `boolean` | `false`                | Ignore warnings for large queries that consume budget quotas.                                                                                                             |
+| `bboxTiles`            | `number`        | `1`                    | Split `bbox` into this many tiles (must be a power of 2: `1`, `2`, `4`, `8`, …). Use when a bbox exceeds your tier area cap.                                              |
+| `splitUntilFit`        | `boolean`       | `false`                | On a truncated tile, count matches and quarter the bbox until each piece fits. Adds latency.                                                                           |
+| `maxFeatures`          | `number | null` | `1000000`              | Cap on merged features after dedupe. Pass `null` for no cap.                                                                                                              |
+| `timeout`              | `number | null` | `60`                   | Wall-clock seconds for this call. Pass `null` for no cap.                                                                                                                 |
 | `zoom`                 | `number`  |                        | Map zoom hint (used by presets / server-side simplification policies).                                                                                                    |
 
 
@@ -146,82 +144,39 @@ Extra filters to for pagination, output format (accept),
 
 ### Meta
 
-Fields for pagination and usage.
-
-
-| Field           | Description                                                           |
-| --------------- | --------------------------------------------------------------------- |
-| `returned`      | Features in this page.                                                |
-| `has_more`      | Whether more pages exist.                                             |
-| `next_cursor`   | Pass as `cursor` on the next `query` call, or `null` when done.       |
-| `units_charged` | Usage for this request when present in terms of cpu and ram consumed. |
+| Field           | Description                                    |
+| --------------- | ---------------------------------------------- |
+| `returned`      | Features in the merged result.                 |
+| `has_more`      | `true` if the client trimmed to `maxFeatures`. |
+| `units_charged` | Usage for a single-request call when present.  |
 
 
 
-
-## `query_all`
-
-Auto-paginates (and optionally tiles the bbox) until the result is complete or a client-side cap is hit. GeoJSON only — for FlatGeobuf / other encodings, use `query` with `accept`.
-
-Does not take `limit` or `cursor`; paging is handled internally. Does not tile when `within` is set (`bboxTiles` is ignored).
-
+## Query a large bbox
+Use this to query a larger bbox than what is allowed by splitting the bbox up into multiple tiles and requests.
 ```ts
-const all = await client.query_all({
-  bbox: '18.06,59.32,18.09,59.34',
-  tags: ['building'],
-  limitPerPage: 1000,
-  bboxTiles: 2,
-  maxPages: 15,
-  maxFeatures: 55_000,
+const allRestaurants = await client.query({
+  bbox: '18.063,59.322,18.082,59.332',
+  tags: ['amenity=restaurant'],
+  splitUntilFit: true,
+  maxFeatures: 1_000_000,
+  timeout: 60,
 });
-
-console.log(all.data.features.length);
-console.log(all.meta.page_count, all.meta.has_more, all.meta.units_charged);
 ```
 
-
-
-### Params
-
-Same filter params as `query` (`bbox`, `tags`, `orTags`, `notTags`, `type`, `wayShape`, `zoom`, `location`, `radius`, `within`, `osmIds`, `minLengthM`, `maxLengthM`, `minAreaM2`, `maxAreaM2`, `centroid`, `clipGeometry`, `disableBudgetWarning`), plus:
-
-
-| Param          | Type            | Default                | Description                                                                                                                                               |
-| -------------- | --------------- | ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `limitPerPage` | `number`        | API `1000`             | Upstream `limit` per HTTP request (page size). Omit to use the API default.                                                                               |
-| `bboxTiles`    | `number`        | `2`                    | Split `bbox` into this many tiles (must be a power of 2: `1`, `2`, `4`, `8`, …). Each tile is paginated separately, then features are merged and deduped. |
-| `maxPages`     | `number`        | `15`                   | Max pages fetched **per tile**.                                                                                                                           |
-| `maxFeatures`  | `number | null` | `55000`                | Cap on merged features after dedupe. Pass `null` for no cap.                                                                                              |
-| `accept`       | `string`        | `application/geo+json` | Must be GeoJSON (or omitted). Non-GeoJSON throws.                                                                                                         |
-
-
-
-
-### Meta
-
-Same fields as `query`, plus:
-
-
-| Field                  | Description                                                                          |
-| ---------------------- | ------------------------------------------------------------------------------------ |
-| `page_count`           | Total upstream pages fetched.                                                        |
-| `has_more`             | `true` if stopped early (caps), or upstream still had more, or a partial relay stop. |
-| `next_cursor`          | Last cursor when incomplete; otherwise the final page cursor.                        |
-| `units_charged`        | Sum of units charged across pages when present.                                      |
-| `relay_partial`        | `true` if paging stopped after a mid-stream 400/429 (partial result kept).           |
-| `relay_partial_reason` | e.g. `upstream_rejected_cursor` or `upstream_rate_limited_after_retries`.            |
+`query_all()` is the same as `query()`.
 
 
 Also exports layer presets (`resolveLayerFromQuery`, `OSM_FEATURES_LAYER_PRESETS`, ...),
 GeoJSON payload helpers (`featureCentroid`, `geometryBounds`, `parseFeatureId`, ...),
 and local helpers (`nearest_within`, `point_in_geometry`, `isOpenNow`).
 
-## `stats`
+## `count`
 
-Count features grouped by a tag key via `GET /v2/osm_features/stats`. Returns `{ groups, total, truncated }`. Spatial windows are larger than `query` (country-scale on every tier) and billed count-only. `limit` is max histogram buckets (API default 100), not a scan cap. `groupBy` is required. Same tag filters as `query`; no `osmIds`, `cursor`, `zoom`, `centroid`, or `clipGeometry`. Map Express/query strings with `resolveStatsRequest` (requires `group_by`).
+Count features grouped by a tag key via `GET /v2/osm_features/count`. Returns `{ groups, total, truncated }`. Spatial windows are larger than `query` (country-scale on every tier) and billed count-only. `limit` is max histogram buckets (API default 100), not a scan cap. `groupBy` is required. Same tag filters as `query`; no `osmIds`, `zoom`, `centroid`, or `clipGeometry`. Map Express/query strings with `resolveCountRequest` (requires `group_by`).
 
 ```ts
-const histogram = await client.stats({
+const histogram = await client.count({
   groupBy: 'amenity',
   bbox: '18.05,59.32,18.10,59.34',
   type: 'node',
@@ -233,23 +188,11 @@ console.log(histogram.total, histogram.groups);
 City boundary:
 
 ```ts
-const mix = await client.stats({
+const mix = await client.count({
   groupBy: 'amenity',
   within: 'relation/398021',
   tags: ['amenity'],
 });
-```
-
-## `estimate_cost`
-
-Preflight credit cost via `GET /v2/osm_features/cost`. Same filter params as `query`. No OSM data is fetched.
-
-```ts
-const estimate = await client.estimate_cost({
-  bbox: '18.06,59.32,18.09,59.34',
-  tags: ['building'],
-});
-console.log(estimate.estimated_credits);
 ```
 
 ## `usage`
@@ -337,7 +280,7 @@ for (const pair of pairs) {
 }
 ```
 
-Each pair is `{ feature, distance_m, nearest }`. The point is `geometry` when it is a Point, otherwise `properties.centroid` (same as `featureCentroid`). Neither present throws. Empty secondary → `[]`. Distances are spherical haversine (mean Earth radius 6371000 m). `limit` keeps the closest pairs (default 20); `{ limit: null }` returns every primary with a match. More than 500000 comparisons throws — lower `places_search` / `places_nearby` `limit`, do not use `query_all`. `{ data, meta }` from `query()` / `query_all()` is accepted.
+Each pair is `{ feature, distance_m, nearest }`. The point is `geometry` when it is a Point, otherwise `properties.centroid` (same as `featureCentroid`). Neither present throws. Empty secondary → `[]`. Distances are spherical haversine (mean Earth radius 6371000 m). `limit` keeps the closest pairs (default 20); `{ limit: null }` returns every primary with a match. More than 500000 comparisons throws — lower `places_search` / `places_nearby` `limit`, do not dump a large `query()` result. `{ data, meta }` from `query()` is accepted.
 
 ### Walk and bike routes
 
