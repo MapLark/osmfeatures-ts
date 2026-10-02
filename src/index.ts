@@ -4,8 +4,15 @@ type AppError = Error & {
   status?: number;
   code?: string;
   subtype?: string;
+  units?: number;
   upstreamStatus?: number;
   upstreamDetail?: string;
+};
+
+type UpstreamErrorBody = {
+  detail?: string;
+  subtype?: string;
+  units?: number;
 };
 
 /** Response metadata (not part of GeoJSON body). */
@@ -725,16 +732,40 @@ function dedupeFeatures(features: unknown[]): unknown[] {
   return deduped;
 }
 
-async function readUpstreamErrorDetail(upstream: globalThis.Response): Promise<string | undefined> {
+async function readUpstreamError(upstream: globalThis.Response): Promise<UpstreamErrorBody> {
   try {
     const rawBody = await upstream.text();
-    if (rawBody !== '') {
-      return rawBody;
+    if (rawBody === '') {
+      return { detail: upstream.statusText || undefined };
+    }
+    try {
+      const body = JSON.parse(rawBody) as Record<string, unknown>;
+      const detail = typeof body.detail === 'string' ? body.detail : rawBody;
+      const subtype = typeof body.subtype === 'string' ? body.subtype : undefined;
+      const units = typeof body.units === 'number' && Number.isFinite(body.units)
+        ? body.units
+        : undefined;
+      return { detail, subtype, units };
+    } catch {
+      return { detail: rawBody };
     }
   } catch {
-    // Fall through to status text.
+    return { detail: upstream.statusText || undefined };
   }
-  return upstream.statusText || undefined;
+}
+
+function throwParsedUpstreamError(status: number, parsed: UpstreamErrorBody): never {
+  const subtype = parsed.subtype ?? (status === 429 ? 'upstream_rate_limit' : undefined);
+  const detail = parsed.detail
+    ? `Server returned status ${status}. Details: ${parsed.detail}`
+    : `Server returned status ${status}.`;
+  const err = appError(status, 'upstream_status', detail, subtype);
+  err.upstreamStatus = status;
+  err.upstreamDetail = parsed.detail;
+  if (parsed.units != null) {
+    err.units = parsed.units;
+  }
+  throw err;
 }
 
 export class OSMFeatures {
@@ -834,15 +865,7 @@ export class OSMFeatures {
   }
 
   private async throwUpstreamError(upstream: globalThis.Response): Promise<never> {
-    const subtype = upstream.status === 429 ? 'upstream_rate_limit' : undefined;
-    const upstreamDetail = await readUpstreamErrorDetail(upstream);
-    const detail = upstreamDetail
-      ? `Server returned status ${upstream.status}. Details: ${upstreamDetail}`
-      : `Server returned status ${upstream.status}.`;
-    const err = appError(upstream.status, 'upstream_status', detail, subtype);
-    err.upstreamStatus = upstream.status;
-    err.upstreamDetail = upstreamDetail;
-    throw err;
+    throwParsedUpstreamError(upstream.status, await readUpstreamError(upstream));
   }
 
   /** GET/POST with 429 retry. Throws on non-OK. */
@@ -874,7 +897,11 @@ export class OSMFeatures {
         return upstream;
       }
 
-      if (upstream.status === 429 && retryAttempt < this.retryAttempts) {
+      if (upstream.status === 429) {
+        const parsed = await readUpstreamError(upstream);
+        if (parsed.subtype === 'rate_limit_monthly' || retryAttempt >= this.retryAttempts) {
+          throwParsedUpstreamError(upstream.status, parsed);
+        }
         retryAttempt += 1;
         const retryAfterHeader = upstream.headers.get('retry-after');
         const fallbackMs = Math.min(
@@ -1300,7 +1327,7 @@ export class OSMFeatures {
     );
   }
 
-  /** Find places in a bbox or radius (``POST /v1/places/search``). Features have ``properties.openNow`` when hours are known. */
+  /** Find places in a bbox or radius (``POST /v1/places/search``). Features have ``properties.openNow`` when hours are known. ``metadata.units`` is credits charged. */
   async places_search(
     params: PlacesSearchParams,
     dependencies: OSMFeaturesDependencies = {},
@@ -1314,7 +1341,7 @@ export class OSMFeatures {
     );
   }
 
-  /** Nearest places from a point (``POST /v1/places/nearby``). Features have ``properties.openNow`` when hours are known. */
+  /** Nearest places from a point (``POST /v1/places/nearby``). Features have ``properties.openNow`` when hours are known. ``units`` is credits charged. */
   async places_nearby(
     params: PlacesNearbyParams,
     dependencies: OSMFeaturesDependencies = {},
@@ -1328,7 +1355,7 @@ export class OSMFeatures {
     );
   }
 
-  /** One place by OSM id (``GET /v1/places/{osm_type}/{osm_id}``). Feature has ``properties.openNow`` when hours are known. */
+  /** One place by OSM id (``GET /v1/places/{osm_type}/{osm_id}``). Feature has ``properties.openNow`` when hours are known. ``units`` is credits charged. */
   async places_details(
     params: PlacesDetailsParams,
     dependencies: OSMFeaturesDependencies = {},
@@ -1343,7 +1370,7 @@ export class OSMFeatures {
     );
   }
 
-  /** Reach polygon along the walk/bike network (``POST /v1/routes/isochrone``). */
+  /** Reach polygon along the walk/bike network (``POST /v1/routes/isochrone``). ``units`` is credits charged. */
   async routes_isochrone(
     params: RoutesIsochroneParams,
     dependencies: OSMFeaturesDependencies = {},
@@ -1357,7 +1384,7 @@ export class OSMFeatures {
     );
   }
 
-  /** Given-order walk/bike path (``POST /v1/routes/path``). */
+  /** Given-order walk/bike path (``POST /v1/routes/path``). ``units`` is credits charged. */
   async routes_path(
     params: RoutesPathParams,
     dependencies: OSMFeaturesDependencies = {},
@@ -1371,7 +1398,7 @@ export class OSMFeatures {
     );
   }
 
-  /** TSP walk/bike tour from ``start`` (``POST /v1/routes/optimized_path``). ``loop`` returns to start. */
+  /** TSP walk/bike tour from ``start`` (``POST /v1/routes/optimized_path``). ``loop`` returns to start. ``units`` is credits charged. */
   async routes_optimized_path(
     params: RoutesOptimizedPathParams,
     dependencies: OSMFeaturesDependencies = {},

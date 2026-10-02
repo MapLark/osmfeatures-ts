@@ -13,6 +13,7 @@ type AppError = Error & {
   status?: number;
   code?: string;
   subtype?: string;
+  units?: number;
   upstreamStatus?: number;
   upstreamDetail?: string;
 };
@@ -409,6 +410,42 @@ async function main(): Promise<void> {
   assert.ok(!(retried.data instanceof ArrayBuffer));
   assert.deepEqual(retried.data.features, [feature('retried')]);
 
+  const monthlyResponses = [
+    new Response(
+      JSON.stringify({
+        error: 'too_many_requests',
+        subtype: 'rate_limit_monthly',
+        detail: 'Need 50 credits; 1 remaining this month.',
+        units: 50,
+      }),
+      { status: 429, headers: { 'content-type': 'application/json' } },
+    ),
+    geojsonPage([feature('must-not-run')]),
+  ];
+  await assert.rejects(
+    async () => osmFeatures.query(foodLayer, {
+      fetchFn: async () => {
+        const response = monthlyResponses.shift();
+        if (!response) {
+          throw new Error('monthly 429 must not retry');
+        }
+        return response;
+      },
+      sleepFn: async () => {
+        throw new Error('monthly 429 must not sleep');
+      },
+    }),
+    (error: unknown) => {
+      const appError = error as AppError;
+      assert.equal(appError.status, 429);
+      assert.equal(appError.subtype, 'rate_limit_monthly');
+      assert.equal(appError.units, 50);
+      assert.equal(appError.upstreamDetail, 'Need 50 credits; 1 remaining this month.');
+      assert.equal(monthlyResponses.length, 1);
+      return true;
+    },
+  );
+
   await assert.rejects(
     async () => osmFeatures.query({
       ...foodLayer,
@@ -593,7 +630,7 @@ async function main(): Promise<void> {
     }),
     (error: unknown) => {
       const appError = error as AppError;
-      assert.match(`${appError.upstreamDetail ?? ''} ${appError.message}`, /result_too_large/);
+      assert.equal(appError.subtype, 'result_too_large');
       assert.doesNotMatch(appError.message, /splitUntilFit/);
       return true;
     },
@@ -609,7 +646,7 @@ async function main(): Promise<void> {
     }),
     (error: unknown) => {
       const appError = error as AppError;
-      assert.match(`${appError.upstreamDetail ?? ''} ${appError.message}`, /result_too_large/);
+      assert.equal(appError.subtype, 'result_too_large');
       return true;
     },
   );
@@ -669,13 +706,18 @@ async function main(): Promise<void> {
         searchUrl = toUrl(input).pathname;
         searchBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
         return new Response(
-          JSON.stringify({ type: 'FeatureCollection', features: [] }),
+          JSON.stringify({
+            type: 'FeatureCollection',
+            features: [],
+            metadata: { units: 1, evaluated_at: '2026-08-10T16:00:00Z' },
+          }),
           { status: 200, headers: { 'content-type': 'application/json' } },
         );
       },
     },
   );
   assert.equal(searchOut['type'], 'FeatureCollection');
+  assert.equal((searchOut['metadata'] as { units: number }).units, 1);
   assert.equal(searchUrl, '/v1/places/search');
   assert.deepEqual(searchBody?.['location'], { lat: 59.316, lng: 18.075 });
   assert.deepEqual(searchBody?.['orTags'], ['amenity=cafe']);
@@ -697,13 +739,14 @@ async function main(): Promise<void> {
         nearbyUrl = toUrl(input).pathname;
         nearbyBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
         return new Response(
-          JSON.stringify({ status: 'ok', items: [] }),
+          JSON.stringify({ status: 'ok', items: [], units: 2 }),
           { status: 200, headers: { 'content-type': 'application/json' } },
         );
       },
     },
   );
   assert.equal(nearbyOut['status'], 'ok');
+  assert.equal(nearbyOut['units'], 2);
   assert.equal(nearbyUrl, '/v1/places/nearby');
   assert.equal(nearbyBody?.['openNow'], true);
   assert.equal(nearbyBody?.['asOf'], '2026-08-10T18:00:00+02:00');
@@ -717,13 +760,14 @@ async function main(): Promise<void> {
       fetchFn: async (input) => {
         detailsUrl = toUrl(input).pathname;
         return new Response(
-          JSON.stringify({ status: 'ok', feature: { id: 'node/123' } }),
+          JSON.stringify({ status: 'ok', feature: { id: 'node/123' }, units: 1 }),
           { status: 200, headers: { 'content-type': 'application/json' } },
         );
       },
     },
   );
   assert.equal(detailsOut['status'], 'ok');
+  assert.equal(detailsOut['units'], 1);
   assert.equal(detailsUrl, '/v1/places/node/123');
 
   await assert.rejects(
@@ -758,13 +802,14 @@ async function main(): Promise<void> {
         isoUrl = toUrl(input).pathname;
         isoBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
         return new Response(
-          JSON.stringify({ status: 'ok', geometry: { type: 'Polygon', coordinates: [] } }),
+          JSON.stringify({ status: 'ok', geometry: { type: 'Polygon', coordinates: [] }, units: 4 }),
           { status: 200, headers: { 'content-type': 'application/json' } },
         );
       },
     },
   );
   assert.equal(isoOut['status'], 'ok');
+  assert.equal(isoOut['units'], 4);
   assert.equal(isoUrl, '/v1/routes/isochrone');
   assert.deepEqual(isoBody?.['origin'], { lon: 18.075, lat: 59.316 });
   assert.equal(isoBody?.['max_distance_m'], 500);
@@ -781,13 +826,14 @@ async function main(): Promise<void> {
         pathUrl = toUrl(input).pathname;
         pathBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
         return new Response(
-          JSON.stringify({ status: 'ok', geometry: { type: 'LineString', coordinates: [] } }),
+          JSON.stringify({ status: 'ok', geometry: { type: 'LineString', coordinates: [] }, units: 6 }),
           { status: 200, headers: { 'content-type': 'application/json' } },
         );
       },
     },
   );
   assert.equal(pathOut['status'], 'ok');
+  assert.equal(pathOut['units'], 6);
   assert.equal(pathUrl, '/v1/routes/path');
   assert.deepEqual(pathBody?.['stops'], [{ lon: 18.075, lat: 59.316 }, { lon: 18.08, lat: 59.318 }]);
   assert.equal('travelMode' in (pathBody ?? {}), false);
@@ -806,13 +852,14 @@ async function main(): Promise<void> {
         optUrl = toUrl(input).pathname;
         optBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
         return new Response(
-          JSON.stringify({ status: 'ok' }),
+          JSON.stringify({ status: 'ok', units: 8 }),
           { status: 200, headers: { 'content-type': 'application/json' } },
         );
       },
     },
   );
   assert.equal(optOut['status'], 'ok');
+  assert.equal(optOut['units'], 8);
   assert.equal(optUrl, '/v1/routes/optimized_path');
   assert.deepEqual(optBody?.['start'], { lon: 18.075, lat: 59.316 });
   assert.deepEqual(optBody?.['stops'], [{ lon: 18.08, lat: 59.318 }]);
