@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { MAX_COMPARISONS, nearest_within } from './nearest.js';
+import { MAX_COMPARISONS, nearest_within, pairs_within } from './nearest.js';
 
 function point(fid: string, lon: number, lat: number) {
   return {
@@ -173,6 +173,59 @@ assert.deepEqual(nearest_within([point('node/1', 18.07, 59.33)], [], 100), []);
   assert.throws(
     () => nearest_within([poly], [point('node/1', 0, 0)], 100),
     { message: /centroid/ },
+  );
+}
+
+{
+  const primary = [point('node/1', 18.07, 59.33)];
+  const close = point('node/10', 18.0705, 59.33);
+  const far = point('node/11', 18.09, 59.33);
+  const out = pairs_within(primary, [far, close], 500);
+  assert.equal(out.length, 1);
+  assert.equal((out[0]!.nearest as { id: string }).id, 'node/10');
+}
+
+{
+  const a = [point('node/1', 18.07, 59.33)];
+  const near = point('node/2', 18.0701, 59.33);
+  const mid = point('node/3', 18.072, 59.33);
+  const out = pairs_within(a, [near, mid], 500, { minDistanceM: 50 });
+  assert.equal(out.length, 1);
+  assert.equal((out[0]!.nearest as { id: string }).id, 'node/3');
+  assert.ok(out[0]!.distance_m >= 50);
+}
+
+{
+  const pts = [
+    point('node/1', 18.07, 59.33),
+    point('node/2', 18.0705, 59.33),
+    point('node/3', 18.071, 59.33),
+  ];
+  const out = pairs_within(pts, pts, 2000, { limit: null });
+  const ids = new Set(out.map((p) => `${(p.feature as { id: string }).id}:${(p.nearest as { id: string }).id}`));
+  assert.equal(ids.has('node/1:node/1'), false);
+  assert.equal(ids.has('node/2:node/1'), false);
+  assert.equal(ids.has('node/1:node/2'), true);
+  assert.equal(out.length, 3);
+}
+
+{
+  const primaries = Array.from({ length: 5 }, (_, i) => point(`node/p${i}`, 18.07, 59.33));
+  const secondaries = Array.from({ length: 5 }, (_, i) => point(`node/s${i}`, 18.07, 59.33));
+  assert.throws(
+    () => pairs_within(primaries, secondaries, 2000, { maxComparisons: 20 }),
+    { message: /5×5 comparisons/ },
+  );
+}
+
+{
+  const pts = Array.from({ length: 5 }, (_, i) => point(`node/${i}`, 18.07 + i * 0.001, 59.33));
+  const out = pairs_within(pts, pts, 2000, { limit: null, maxComparisons: 20 });
+  assert.equal(out.length, 10);
+  const over = Array.from({ length: 7 }, (_, i) => point(`node/${i}`, 18.07 + i * 0.001, 59.33));
+  assert.throws(
+    () => pairs_within(over, over, 2000, { maxComparisons: 20 }),
+    { message: /7 self-join comparisons/ },
   );
 }
 

@@ -7,6 +7,9 @@ type AppError = Error & {
   units?: number;
   upstreamStatus?: number;
   upstreamDetail?: string;
+  tiles?: number;
+  maxTiles?: number;
+  total?: number | null;
 };
 
 type UpstreamErrorBody = {
@@ -18,9 +21,12 @@ type UpstreamErrorBody = {
 /** Response metadata (not part of GeoJSON body). */
 export type OSMFeaturesMeta = {
   returned: number;
-  /** True when the tile was truncated, or the client trimmed to ``maxFeatures``. */
+  /** True when the tile was truncated (``X-Has-More``). */
   has_more: boolean;
-  /** From ``X-Usage-Units-Charged`` when present (authenticated API). */
+  /**
+   * From ``X-Usage-Units-Charged`` when present (authenticated API).
+   * After ``bboxTiles`` / ``autoSplit``, the sum of the feature tiles.
+   */
   units_charged?: number;
 };
 
@@ -93,7 +99,7 @@ export type OSMFeaturesParams = OSMFeaturesLayer & {
   maxLengthM?: number;
   minAreaM2?: number;
   maxAreaM2?: number;
-  /** Count-only (`splitUntilFit`). Not sent on `/v3/osm_features`. */
+  /** Count-only (`autoSplit`). Not sent on `/v3/osm_features`. */
   disableBudgetWarning?: boolean;
   /** When true, include `properties.centroid` on non-point features. Omit for the API default (false). */
   centroid?: boolean;
@@ -103,10 +109,14 @@ export type OSMFeaturesParams = OSMFeaturesLayer & {
   accept?: string;
   /** Split the bbox into this many tiles (power of 2). Default 1. */
   bboxTiles?: number;
-  /** Count matches first, then fetch. Quarter until each piece fits. */
+  /**
+   * Count matches first, then fetch. Jumps to a power-of-2 tile grid when the
+   * match set exceeds the key's `max_limit`, and jumps once more for one leftover
+   * dense leaf. A bbox-area 400 jumps to that tile size (max 32 tiles).
+   */
+  autoSplit?: boolean;
+  /** @deprecated Use `autoSplit`. */
   splitUntilFit?: boolean;
-  /** Cap on merged features. Default 1_000_000. `null` = no cap. */
-  maxFeatures?: number | null;
   /** Wall-clock seconds for this call. Default 60. `null` = no cap. */
   timeout?: number | null;
   /** Maximum features in the response. Omit for the key's max_limit. Client max 1000000. The API rejects above the key's max_limit. */
@@ -115,8 +125,8 @@ export type OSMFeaturesParams = OSMFeaturesLayer & {
 
 /** `GET /v2/osm_features/count`. Same filters as `query` except geometry extras. */
 export type OSMFeaturesCountParams = {
-  /** Tag key to group on (required). Features without this key are not counted. */
-  groupBy: string;
+  /** Tag key to group on. Omit for a scalar total (`groups` is empty). */
+  groupBy?: string;
   bbox?: string;
   location?: string;
   radius?: number;
@@ -143,6 +153,44 @@ export type OSMCountResponse = {
   groups: OSMCountGroup[];
   total: number;
   truncated: boolean;
+};
+
+/** `GET /v2/osm_features/density`. Same filters as `count` except no `groupBy`. */
+export type OSMFeaturesDensityParams = {
+  /** Grid cell size in degrees. Omit for the API default (0.1). */
+  cellDeg?: number;
+  bbox?: string;
+  location?: string;
+  radius?: number;
+  within?: string;
+  type?: string;
+  wayShape?: 'line' | 'polygon' | 'all';
+  /** @deprecated Use `wayShape`. */
+  shape?: 'line' | 'polygon' | 'all';
+  tags?: string[];
+  orTags?: string[];
+  notTags?: string[];
+  /** Max occupied cells. Omit for the key's max_limit. */
+  limit?: number;
+  minLengthM?: number;
+  maxLengthM?: number;
+  minAreaM2?: number;
+  maxAreaM2?: number;
+  disableBudgetWarning?: boolean;
+};
+
+export type OSMDensityFeature = {
+  type: 'Feature';
+  geometry: { type: 'Point'; coordinates: [number, number] };
+  properties: { count: number };
+};
+
+export type OSMDensityResponse = {
+  type: 'FeatureCollection';
+  features: OSMDensityFeature[];
+  total: number;
+  truncated: boolean;
+  hint?: string;
 };
 
 type QueryValue = unknown;
@@ -178,19 +226,25 @@ export type PlacesSearchParams = {
   bbox?: string;
   location?: LonLat;
   radius?: number;
-  type?: string;
   tags?: string[];
   orTags?: string[];
   limit?: number;
   /** Keep only places known open at ``asOf`` (or now). Untagged hours are dropped. */
   openNow?: boolean;
   asOf?: string;
+  /** Split the bbox up front (power of 2). Bbox search only. */
+  bboxTiles?: number;
+  /** Count first (`way_shape=polygon`), then fetch. Bbox search only. Same walk as `query`. */
+  autoSplit?: boolean;
+  /** @deprecated Use `autoSplit`. */
+  splitUntilFit?: boolean;
+  /** Wall-clock seconds for a tiled search. Default 60. `null` = no cap. */
+  timeout?: number | null;
 };
 
 export type PlacesNearbyParams = {
   location: LonLat;
   radius?: number;
-  type?: string;
   tags?: string[];
   orTags?: string[];
   limit?: number;
@@ -257,10 +311,22 @@ type OSMFeaturesDependencies = {
 
 const DEFAULT_BASE_URL = 'https://api.maplark.com';
 const V3_PATH = '/v3/osm_features';
-// splitUntilFit when the caller omitted limit. Free max_limit; paid keys allow more.
-const V3_SPLIT_WHEN_LIMIT_OMITTED = 100_000;
+const ACCOUNT_TIER_PATH = '/v1/account/tier';
+/** How long ``account_tier`` / ``autoSplit`` reuse ``GET /v1/account/tier``. */
+const ACCOUNT_TIER_CACHE_MS = 5 * 60 * 1000;
 // Enterprise TIER_LIMITS max_limit. The API rejects limit_exceeds_tier above the key.
 const V3_MAX_LIMIT = 1_000_000;
+// Hours-parse cap when places_search sends asOf/openNow. No-hours autoSplit
+// uses GET /v1/account/tier max_limit instead.
+const PLACES_MAX_LIMIT = 10_000;
+// Five longest-side bisections. Density jumps the parent, then at most one leftover leaf.
+const MAX_SPLIT_TILES = 32;
+const MAX_DENSITY_JUMP_DEPTH = 1;
+// Count never density-splits when the fetch cannot 400. Area 400s still split.
+const NO_DENSITY_CAP = 2 ** 31 - 1;
+// Search/query fetch 400s. Do not match "count bbox area".
+const AREA_LIMIT_RE =
+  /(?<!count )bbox area [0-9.]+\s+exceeds the (?:tagged )?tier limit ([0-9.]+)/i;
 
 function resolveQueryLimit(limit: number | undefined): number | undefined {
   if (limit == null) {
@@ -271,12 +337,9 @@ function resolveQueryLimit(limit: number | undefined): number | undefined {
   }
   return limit;
 }
-const DEFAULT_MAX_FEATURES = 1_000_000;
-const V3_SPLIT_DEPTH = 6;
 const DEFAULT_QUERY_TIMEOUT_S = 60;
+const METRES_PER_DEG_LAT = 111_320;
 const GEOJSON_ACCEPT = 'application/geo+json';
-// Same keys /v2/osm_features/count refuses as group_by.
-const COUNT_UNBOUNDED_KEYS = new Set(['name', 'ref', 'addr:housenumber']);
 
 function isGeojsonAccept(accept: string | undefined): boolean {
   if (accept == null || accept.trim() === '') {
@@ -326,6 +389,21 @@ function optionalNumber(query: OSMFeaturesQuery, key: string): number | undefine
   }
   const parsed = Number.parseFloat(text);
   return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function optionalTimeout(query: OSMFeaturesQuery): number | null | undefined {
+  const raw = query['timeout'];
+  if (raw === null) {
+    return null;
+  }
+  if (raw == null || raw === '') {
+    return undefined;
+  }
+  const text = String(Array.isArray(raw) ? raw[0] : raw).trim().toLowerCase();
+  if (text === 'null') {
+    return null;
+  }
+  return optionalNumber(query, 'timeout');
 }
 
 function optionalBoolean(query: OSMFeaturesQuery, key: string): boolean | undefined {
@@ -378,38 +456,363 @@ function asQueryMap(query: OSMFeaturesQuery | URLSearchParams): OSMFeaturesQuery
   return query instanceof URLSearchParams ? queryFromSearchParams(query) : query;
 }
 
-function isResultTooLarge(error: unknown): boolean {
+function errorText(error: unknown): string {
   const err = error as AppError;
-  if (err.status !== 400) {
-    return false;
-  }
-  const detail = `${err.upstreamDetail ?? ''} ${err.message ?? ''} ${err.subtype ?? ''}`;
-  return detail.includes('result_too_large');
+  return `${err.upstreamDetail ?? ''} ${err.message ?? ''} ${err.subtype ?? ''}`;
 }
 
-function countGroupKey(tags: string[] | undefined): string | null {
-  if (tags == null || tags.length === 0) {
+function isStatus400(error: unknown): boolean {
+  return (error as AppError).status === 400;
+}
+
+function isResultTooLarge(error: unknown): boolean {
+  return isStatus400(error) && errorText(error).includes('result_too_large');
+}
+
+function isHoursParseLimit(error: unknown): boolean {
+  return isStatus400(error) && errorText(error).includes('hours_parse_limit');
+}
+
+function parseBboxAreaLimit(error: unknown): number | null {
+  if (!isStatus400(error)) {
     return null;
   }
-  const item = String(tags[0]);
-  let key = item;
-  for (const op of ['>=', '<=', '>', '<', '=']) {
-    const idx = item.indexOf(op);
-    if (idx >= 0) {
-      key = item.slice(0, idx);
+  const match = AREA_LIMIT_RE.exec(errorText(error));
+  if (match == null) {
+    return null;
+  }
+  const limit = Number.parseFloat(match[1] ?? '');
+  return limit > 0 ? limit : null;
+}
+
+function nextPowerOfTwo(n: number): number {
+  if (n <= 1) {
+    return 1;
+  }
+  // `1 << k` is 32-bit and wraps (1<<32 === 1). `2 ** k` stays a JS number.
+  return 2 ** (n - 1).toString(2).length;
+}
+
+function bboxAreaDeg2(bbox: string): number {
+  const parts = bbox.split(',').map((value) => Number.parseFloat(value.trim()));
+  if (parts.length !== 4 || parts.some((value) => !Number.isFinite(value))) {
+    throw appError(400, 'invalid_bbox', 'bbox must be min_lon,min_lat,max_lon,max_lat.');
+  }
+  return (parts[2]! - parts[0]!) * (parts[3]! - parts[1]!);
+}
+
+function tilesForMatchCount(total: number, tileCap: number): number {
+  if (tileCap <= 0 || total <= tileCap) {
+    return 1;
+  }
+  return nextPowerOfTwo(Math.ceil(total / tileCap));
+}
+
+function tileCountForMaxArea(bbox: string, maxTileArea: number, cap = 4096): number {
+  const area = bboxAreaDeg2(bbox);
+  if (maxTileArea <= 0 || area <= maxTileArea) {
+    return 1;
+  }
+  return Math.min(nextPowerOfTwo(Math.ceil(area / maxTileArea)), nextPowerOfTwo(cap));
+}
+
+function maxLimitFromTier(tier: Record<string, unknown>): number {
+  if (tier['max_limit'] == null) {
+    throw new Error('GET /v1/account/tier must include max_limit');
+  }
+  const value = tier['max_limit'];
+  if (typeof value !== 'number' || !Number.isInteger(value)) {
+    throw new Error('tier max_limit must be an integer');
+  }
+  if (value < 1) {
+    throw new Error('tier max_limit must be >= 1');
+  }
+  return value;
+}
+
+function matchSplitCap(limit: number | undefined, omitted: number): number {
+  if (limit == null) {
+    return omitted;
+  }
+  return Math.max(limit, omitted);
+}
+
+function hoursParseSplitCap(limit: number | undefined, openNow: boolean): number {
+  if (openNow) {
+    return PLACES_MAX_LIMIT;
+  }
+  if (limit != null && limit > PLACES_MAX_LIMIT) {
+    return PLACES_MAX_LIMIT;
+  }
+  return NO_DENSITY_CAP;
+}
+
+function tooManyTilesMessage(needed: number, total?: number | null): string {
+  const extra = total != null ? ` for ${total} matches` : '';
+  return (
+    `autoSplit needs ${needed} bbox tiles${extra} `
+    + `(max ${MAX_SPLIT_TILES}). The area is too large to query. `
+    + 'Geocode a smaller named place (city or neighborhood), or ask '
+    + 'the user which area to use. Do not split the leftover bbox.'
+  );
+}
+
+function tooDenseMessage(total?: number | null): string {
+  const extra = total != null ? ` (${total} matches)` : '';
+  return (
+    `autoSplit cannot fetch this area: it is still too dense after a `
+    + `power-of-2 jump${extra} (max ${MAX_SPLIT_TILES} tiles). Ask the user `
+    + 'to shrink the area or add filters (more specific tags). If they do '
+    + 'not answer, add tighter tags and retry a smaller named place.'
+  );
+}
+
+function tileWalkError(
+  code: 'too_many_tiles' | 'too_dense',
+  detail: string,
+  extra: { tiles?: number; maxTiles: number; total?: number | null },
+): AppError {
+  const err = new Error(detail) as AppError;
+  err.code = code;
+  err.maxTiles = extra.maxTiles;
+  if (extra.tiles != null) {
+    err.tiles = extra.tiles;
+  }
+  if (extra.total !== undefined) {
+    err.total = extra.total;
+  }
+  return err;
+}
+
+/** `splitUntilFit` is the deprecated alias for `autoSplit`. */
+function foldAutoSplit(autoSplit: boolean, splitUntilFit: boolean | undefined): boolean {
+  if (splitUntilFit == null) {
+    return autoSplit;
+  }
+  console.warn('[osmfeatures] splitUntilFit is deprecated; use autoSplit');
+  if (autoSplit && autoSplit !== splitUntilFit) {
+    throw new Error('autoSplit and deprecated splitUntilFit disagree. Pass only autoSplit.');
+  }
+  return splitUntilFit || autoSplit;
+}
+
+function presentText(value: string | undefined): boolean {
+  return value != null && value !== '';
+}
+
+/** Same exclusivity rules as GET /v3/osm_features and /v2/osm_features/count. */
+function assertExclusiveSpatial(params: {
+  bbox?: string;
+  location?: string;
+  radius?: number;
+  within?: string;
+  osmIds?: string;
+  tags?: string[];
+  orTags?: string[];
+  notTags?: string[];
+}): void {
+  const hasBbox = presentText(params.bbox);
+  const hasLocation = presentText(params.location);
+  const hasRadius = params.radius != null;
+  const hasWithin = presentText(params.within);
+  const hasOsmIds = presentText(params.osmIds);
+  const hasTags = (params.tags?.length ?? 0) > 0
+    || (params.orTags?.length ?? 0) > 0
+    || (params.notTags?.length ?? 0) > 0;
+
+  if (hasLocation !== hasRadius) {
+    throw appError(
+      400,
+      'invalid_spatial',
+      'location and radius must both be supplied together for a radius search.',
+    );
+  }
+  const anchors = Number(hasBbox) + Number(hasLocation) + Number(hasWithin) + Number(hasOsmIds);
+  if (anchors > 1) {
+    throw appError(
+      400,
+      'invalid_spatial',
+      'bbox, location+radius, within, and osmIds are mutually exclusive spatial anchors.',
+    );
+  }
+  if (hasOsmIds && hasTags) {
+    throw appError(
+      400,
+      'invalid_spatial',
+      'osmIds is a direct ID lookup and cannot be combined with tag filters or spatial anchors.',
+    );
+  }
+}
+
+async function* iterSplitTiles<T>(options: {
+  bbox: string;
+  bboxTiles: number;
+  autoSplit: boolean;
+  timeout: number | null;
+  nowFn: () => number;
+  tileCap: number;
+  matchCount: ((tile: string) => Promise<number>) | null;
+  fetchTile: (tile: string) => Promise<T>;
+  shouldStop?: () => boolean;
+  overflowName: string;
+}): AsyncGenerator<T> {
+  const {
+    bbox,
+    bboxTiles,
+    autoSplit,
+    timeout,
+    nowFn,
+    tileCap,
+    matchCount,
+    fetchTile,
+    shouldStop,
+    overflowName,
+  } = options;
+  const deadline = timeout == null ? null : nowFn() + timeout * 1000;
+  const tiles: Array<[string, number]> = splitBbox(bbox, bboxTiles).map((tile) => [tile, 0]);
+  if (autoSplit && tiles.length > MAX_SPLIT_TILES) {
+    throw tileWalkError(
+      'too_many_tiles',
+      tooManyTilesMessage(tiles.length),
+      { tiles: tiles.length, maxTiles: MAX_SPLIT_TILES },
+    );
+  }
+  let areaLimit: number | null = null;
+  let lastTotal: number | null = null;
+  let started = false;
+  let fetched = 0;
+
+  const deadlineCheck = (): void => {
+    if (deadline != null && nowFn() >= deadline) {
+      throw appError(408, 'query_timeout', `${overflowName} exceeded ${timeout}s timeout`);
+    }
+  };
+
+  const raiseTooDense = (tilesNeeded?: number): never => {
+    throw tileWalkError(
+      'too_dense',
+      tooDenseMessage(lastTotal),
+      { maxTiles: MAX_SPLIT_TILES, tiles: tilesNeeded, total: lastTotal },
+    );
+  };
+
+  const raiseTooMany = (tilesNeeded: number): never => {
+    throw tileWalkError(
+      'too_many_tiles',
+      tooManyTilesMessage(tilesNeeded, lastTotal),
+      { tiles: tilesNeeded, maxTiles: MAX_SPLIT_TILES, total: lastTotal },
+    );
+  };
+
+  const enqueue = (
+    children: string[],
+    depth: number,
+    overflow: (needed: number) => never,
+  ): void => {
+    const needed = fetched + tiles.length + children.length;
+    if (needed > MAX_SPLIT_TILES) {
+      overflow(needed);
+    }
+    const childDepth = depth + 1;
+    for (const child of children) {
+      tiles.push([child, childDepth]);
+    }
+  };
+
+  const jumpDensity = (tile: string, depth: number, total: number): void => {
+    if (depth > MAX_DENSITY_JUMP_DEPTH) {
+      raiseTooDense();
+    }
+    const n = tilesForMatchCount(total, tileCap);
+    if (n > MAX_SPLIT_TILES) {
+      raiseTooDense(n);
+    }
+    enqueue(splitBbox(tile, n), depth, raiseTooDense);
+  };
+
+  const enqueueArea = (tile: string, depth: number, limit: number): boolean => {
+    const n = tileCountForMaxArea(tile, limit);
+    if (n <= 1) {
+      return false;
+    }
+    if (n > MAX_SPLIT_TILES) {
+      raiseTooMany(n);
+    }
+    enqueue(splitBbox(tile, n), depth, raiseTooMany);
+    return true;
+  };
+
+  const onSplitError = (tile: string, depth: number, error: unknown): boolean => {
+    const limit = parseBboxAreaLimit(error);
+    if (limit != null) {
+      areaLimit = limit;
+      return enqueueArea(tile, depth, limit);
+    }
+    if (isHoursParseLimit(error)) {
+      jumpDensity(tile, depth, Math.max(lastTotal ?? 0, tileCap) + 1);
+      return true;
+    }
+    if (isResultTooLarge(error)) {
+      raiseTooDense();
+    }
+    return false;
+  };
+
+  while (tiles.length > 0) {
+    if (started) {
+      deadlineCheck();
+    }
+    started = true;
+    if (shouldStop?.()) {
       break;
     }
+    const next = tiles.shift();
+    if (next == null) {
+      break;
+    }
+    const [tile, depth] = next;
+    lastTotal = null;
+    if (autoSplit && areaLimit != null && bboxAreaDeg2(tile) > areaLimit) {
+      if (!enqueueArea(tile, depth, areaLimit)) {
+        raiseTooDense();
+      }
+      continue;
+    }
+    if (autoSplit && matchCount != null) {
+      let total: number;
+      try {
+        total = await matchCount(tile);
+      } catch (error) {
+        if (isStatus400(error) && onSplitError(tile, depth, error)) {
+          continue;
+        }
+        throw error;
+      }
+      lastTotal = total;
+      if (total === 0) {
+        continue;
+      }
+      if (total > tileCap) {
+        jumpDensity(tile, depth, total);
+        continue;
+      }
+    }
+    try {
+      const page = await fetchTile(tile);
+      fetched += 1;
+      yield page;
+    } catch (error) {
+      if (autoSplit && isStatus400(error) && onSplitError(tile, depth, error)) {
+        continue;
+      }
+      throw error;
+    }
   }
-  key = key.trim();
-  if (!key || COUNT_UNBOUNDED_KEYS.has(key)) {
-    return null;
-  }
-  return key;
 }
 
-/** Parse `bbox_tiles` from a query map for `query` (client-side only). */
+/** Parse `bbox_tiles` / `bboxTiles` from a query map for `query` (client-side only). */
 export function resolveBboxTiles(query: OSMFeaturesQuery = {}, fallback: number = 1): number {
-  const raw = optionalString(query, 'bbox_tiles');
+  const raw = optionalString(query, 'bbox_tiles') ?? optionalString(query, 'bboxTiles');
   if (raw == null) {
     return fallback;
   }
@@ -463,6 +866,13 @@ export function splitBbox(bbox: string, tileCount: number): string[] {
     `${minLon},${minLat},${maxLon},${maxLat}`);
 }
 
+/** Square bbox that fully contains a circle of `radiusM` around `lon, lat`. */
+export function around_to_bbox(lon: number, lat: number, radiusM: number): string {
+  const dlat = radiusM / METRES_PER_DEG_LAT;
+  const dlon = radiusM / (METRES_PER_DEG_LAT * Math.max(Math.cos((lat * Math.PI) / 180), 1e-9));
+  return `${lon - dlon},${lat - dlat},${lon + dlon},${lat + dlat}`;
+}
+
 type RawQueryParams = {
   bbox?: string;
   /** v3 tile size (omit for API default, max 1000000) or count histogram bucket cap. */
@@ -478,6 +888,8 @@ type RawQueryParams = {
   minAreaM2?: number;
   maxAreaM2?: number;
   disableBudgetWarning?: boolean;
+  /** Density grid cell size in degrees. */
+  cellDeg?: number;
   centroid?: boolean;
   clipGeometry?: boolean;
   accept?: string;
@@ -530,6 +942,9 @@ function buildFeaturesQuery(params: RawQueryParams): URLSearchParams {
   }
   if (params.disableBudgetWarning) {
     query.set('disable_budget_warning', String(params.disableBudgetWarning));
+  }
+  if (params.cellDeg != null) {
+    query.set('cell_deg', String(params.cellDeg));
   }
   if (params.centroid) {
     query.set('centroid', String(params.centroid));
@@ -597,9 +1012,6 @@ function placesSearchBody(params: PlacesSearchParams): Record<string, unknown> {
   if (params.radius != null) {
     body['radius'] = params.radius;
   }
-  if (params.type != null) {
-    body['type'] = params.type;
-  }
   if (params.tags?.length) {
     body['tags'] = params.tags;
   }
@@ -624,9 +1036,6 @@ function placesNearbyBody(params: PlacesNearbyParams): Record<string, unknown> {
   };
   if (params.radius != null) {
     body['radius'] = params.radius;
-  }
-  if (params.type != null) {
-    body['type'] = params.type;
   }
   if (params.tags?.length) {
     body['tags'] = params.tags;
@@ -732,6 +1141,73 @@ function dedupeFeatures(features: unknown[]): unknown[] {
   return deduped;
 }
 
+const PLACE_SUM_META_KEYS = ['units', 'input_count', 'kept_count', 'hours_parsed'] as const;
+
+function mergeFeaturesById(lists: unknown[][]): unknown[] {
+  const seen = new Set<string>();
+  const merged: unknown[] = [];
+  let fallback = 0;
+  for (const list of lists) {
+    for (const feat of list) {
+      const raw = feat != null && typeof feat === 'object' && 'id' in feat && feat.id != null
+        ? String(feat.id)
+        : '';
+      const id = raw !== '' ? raw : `fallback-${fallback}`;
+      fallback += 1;
+      if (seen.has(id)) {
+        continue;
+      }
+      seen.add(id);
+      merged.push(feat);
+    }
+  }
+  return merged;
+}
+
+function mergePlaceMetadata(metas: Record<string, unknown>[]): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...metas[0] };
+  delete out['hint'];
+  for (const key of PLACE_SUM_META_KEYS) {
+    let total = 0;
+    let seen = false;
+    for (const meta of metas) {
+      const value = meta[key];
+      if (typeof value !== 'number' || !Number.isFinite(value)) {
+        continue;
+      }
+      total += Math.trunc(value);
+      seen = true;
+    }
+    if (seen) {
+      out[key] = total;
+    }
+  }
+  if (metas.some((meta) => meta['hours_parse_capped'])) {
+    out['hours_parse_capped'] = true;
+  }
+  return out;
+}
+
+function mergePlaceCollections(payloads: Record<string, unknown>[]): Record<string, unknown> {
+  if (payloads.length === 0) {
+    return { type: 'FeatureCollection', features: [] };
+  }
+  const features = mergeFeaturesById(
+    payloads.map((payload) => (Array.isArray(payload['features']) ? payload['features'] : [])),
+  );
+  const out: Record<string, unknown> = { ...payloads[0] };
+  out['type'] = 'FeatureCollection';
+  out['features'] = features;
+  const metas = payloads
+    .map((payload) => payload['metadata'])
+    .filter((meta): meta is Record<string, unknown> =>
+      meta != null && typeof meta === 'object' && !Array.isArray(meta));
+  if (metas.length > 0) {
+    out['metadata'] = mergePlaceMetadata(metas);
+  }
+  return out;
+}
+
 async function readUpstreamError(upstream: globalThis.Response): Promise<UpstreamErrorBody> {
   try {
     const rawBody = await upstream.text();
@@ -775,6 +1251,7 @@ export class OSMFeatures {
   private readonly retryAttempts: number;
   private readonly retryBaseMs: number;
   private readonly retryMaxMs: number;
+  private accountTierCache: { body: Record<string, unknown>; expiresAt: number } | null = null;
 
   constructor(
     apiKey: string,
@@ -801,31 +1278,59 @@ export class OSMFeatures {
   }
 
   /** Map Express/query params + resolved layer into flat `query` / `query_all` params. */
-  resolveRequest(query: OSMFeaturesQuery, layer: OSMFeaturesLayer): OSMFeaturesParams {
-    return {
+  resolveRequest(query: OSMFeaturesQuery | URLSearchParams, layer: OSMFeaturesLayer): OSMFeaturesParams {
+    const q = asQueryMap(query);
+    const limit = optionalNumber(q, 'limit');
+    const timeout = optionalTimeout(q);
+    const bboxTilesRaw = optionalString(q, 'bbox_tiles') ?? optionalString(q, 'bboxTiles');
+    const location = optionalString(q, 'location');
+    const radius = optionalNumber(q, 'radius');
+    const within = optionalString(q, 'within');
+    const osmIds = optionalString(q, 'osm_ids');
+    const params: OSMFeaturesParams = {
       ...layer,
-      zoom: optionalNumber(query, 'zoom'),
-      location: optionalString(query, 'location'),
-      radius: optionalNumber(query, 'radius'),
-      within: optionalString(query, 'within'),
-      osmIds: optionalString(query, 'osm_ids'),
-      minLengthM: optionalNumber(query, 'min_length_m'),
-      maxLengthM: optionalNumber(query, 'max_length_m'),
-      minAreaM2: optionalNumber(query, 'min_area_m2'),
-      maxAreaM2: optionalNumber(query, 'max_area_m2'),
-      disableBudgetWarning: optionalBoolean(query, 'disable_budget_warning'),
-      centroid: optionalBoolean(query, 'centroid'),
-      clipGeometry: optionalBoolean(query, 'clipGeometry'),
+      zoom: optionalNumber(q, 'zoom'),
+      minLengthM: optionalNumber(q, 'min_length_m'),
+      maxLengthM: optionalNumber(q, 'max_length_m'),
+      minAreaM2: optionalNumber(q, 'min_area_m2'),
+      maxAreaM2: optionalNumber(q, 'max_area_m2'),
+      disableBudgetWarning: optionalBoolean(q, 'disable_budget_warning'),
+      centroid: optionalBoolean(q, 'centroid'),
+      clipGeometry: optionalBoolean(q, 'clipGeometry') ?? optionalBoolean(q, 'clip_geometry'),
+      accept: optionalString(q, 'accept'),
+      autoSplit: optionalBoolean(q, 'auto_split') ?? optionalBoolean(q, 'autoSplit'),
+      splitUntilFit: optionalBoolean(q, 'split_until_fit') ?? optionalBoolean(q, 'splitUntilFit'),
     };
+    if (osmIds != null) {
+      delete params.bbox;
+      delete params.tags;
+      delete params.orTags;
+      delete params.notTags;
+      params.osmIds = osmIds;
+    } else if (within != null) {
+      delete params.bbox;
+      params.within = within;
+    } else if (location != null || radius != null) {
+      delete params.bbox;
+      if (location != null) params.location = location;
+      if (radius != null) params.radius = radius;
+    }
+    if (limit != null) {
+      params.limit = Math.trunc(limit);
+    }
+    if (timeout !== undefined) {
+      params.timeout = timeout;
+    }
+    if (bboxTilesRaw != null) {
+      params.bboxTiles = resolveBboxTiles({ bbox_tiles: bboxTilesRaw });
+    }
+    return params;
   }
 
-  /** Map Express/query params into `count` params. `group_by` is required. */
+  /** Map Express/query params into `count` params. Omit `group_by` for a scalar total. */
   resolveCountRequest(query: OSMFeaturesQuery | URLSearchParams): OSMFeaturesCountParams {
     const q = asQueryMap(query);
     const groupBy = optionalString(q, 'group_by');
-    if (groupBy == null) {
-      throw appError(400, 'invalid_group_by', 'group_by is required.');
-    }
     const tags = stringList(q, 'tags');
     const orTags = stringList(q, 'or_tags');
     const notTags = stringList(q, 'not_tags');
@@ -834,7 +1339,51 @@ export class OSMFeatures {
       wayShapeRaw === 'line' || wayShapeRaw === 'polygon' || wayShapeRaw === 'all'
         ? wayShapeRaw
         : undefined;
-    const params: OSMFeaturesCountParams = { groupBy };
+    const params: OSMFeaturesCountParams = {};
+    if (groupBy) params.groupBy = groupBy;
+    const bbox = optionalString(q, 'bbox');
+    if (bbox) params.bbox = bbox;
+    const within = optionalString(q, 'within');
+    if (within) params.within = within;
+    const location = optionalString(q, 'location');
+    if (location) params.location = location;
+    const radius = optionalNumber(q, 'radius');
+    if (radius != null) params.radius = radius;
+    const type = optionalString(q, 'type');
+    if (type) params.type = type;
+    if (wayShape) params.wayShape = wayShape;
+    if (tags.length > 0) params.tags = tags;
+    if (orTags.length > 0) params.orTags = orTags;
+    if (notTags.length > 0) params.notTags = notTags;
+    const limit = optionalNumber(q, 'limit');
+    if (limit != null && Number.isFinite(limit)) params.limit = Math.trunc(limit);
+    const minLengthM = optionalNumber(q, 'min_length_m');
+    if (minLengthM != null) params.minLengthM = minLengthM;
+    const maxLengthM = optionalNumber(q, 'max_length_m');
+    if (maxLengthM != null) params.maxLengthM = maxLengthM;
+    const minAreaM2 = optionalNumber(q, 'min_area_m2');
+    if (minAreaM2 != null) params.minAreaM2 = minAreaM2;
+    const maxAreaM2 = optionalNumber(q, 'max_area_m2');
+    if (maxAreaM2 != null) params.maxAreaM2 = maxAreaM2;
+    const disableBudgetWarning = optionalBoolean(q, 'disable_budget_warning');
+    if (disableBudgetWarning) params.disableBudgetWarning = true;
+    return params;
+  }
+
+  /** Map Express/query params into `density` params. Omit `cell_deg` for 0.1. */
+  resolveDensityRequest(query: OSMFeaturesQuery | URLSearchParams): OSMFeaturesDensityParams {
+    const q = asQueryMap(query);
+    const tags = stringList(q, 'tags');
+    const orTags = stringList(q, 'or_tags');
+    const notTags = stringList(q, 'not_tags');
+    const wayShapeRaw = optionalString(q, 'way_shape') ?? optionalString(q, 'shape');
+    const wayShape =
+      wayShapeRaw === 'line' || wayShapeRaw === 'polygon' || wayShapeRaw === 'all'
+        ? wayShapeRaw
+        : undefined;
+    const params: OSMFeaturesDensityParams = {};
+    const cellDeg = optionalNumber(q, 'cell_deg');
+    if (cellDeg != null && Number.isFinite(cellDeg)) params.cellDeg = cellDeg;
     const bbox = optionalString(q, 'bbox');
     if (bbox) params.bbox = bbox;
     const within = optionalString(q, 'within');
@@ -1041,9 +1590,12 @@ export class OSMFeatures {
    *
    * Omit ``limit`` for the key's ``max_limit``. A lower ``limit`` truncates
    * (``meta.has_more``). A match set larger than the caller's ``max_limit``
-   * is HTTP 400 ``result_too_large``. ``splitUntilFit: true`` counts first
-   * and quarters the bbox before that fetch. ``within``, radius, and
-   * ``osmIds`` cannot be split, so the API error propagates.
+   * is HTTP 400 ``result_too_large``. ``autoSplit: true`` reads ``max_limit``
+   * from ``GET /v1/account/tier``, counts first, and jumps to a power-of-2
+   * tile grid when that match set exceeds the cap. A leftover dense leaf may
+   * jump once more. ``autoSplit`` and ``bboxTiles`` require ``bbox``.
+   * ``within``, radius, and ``osmIds`` cannot be split. ``splitUntilFit``
+   * is a deprecated alias.
    */
   async query(
     params: OSMFeaturesParams,
@@ -1071,13 +1623,19 @@ export class OSMFeatures {
       clipGeometry,
       accept,
       bboxTiles = 1,
-      splitUntilFit = false,
-      maxFeatures = DEFAULT_MAX_FEATURES,
+      autoSplit: autoSplitParam = false,
+      splitUntilFit,
       timeout = DEFAULT_QUERY_TIMEOUT_S,
       limit,
     } = params;
+    const autoSplit = foldAutoSplit(autoSplitParam, splitUntilFit);
+    assertExclusiveSpatial({
+      bbox, location, radius, within, osmIds, tags, orTags, notTags,
+    });
     const tileLimit = resolveQueryLimit(limit);
     let apiTruncated = false;
+    let unitsCharged = 0;
+    let sawUnitsCharged = false;
 
     const fetchFn = dependencies.fetchFn ?? fetch;
     const sleepFn = dependencies.sleepFn ?? sleep;
@@ -1104,57 +1662,67 @@ export class OSMFeatures {
     };
 
     if (!isGeojsonAccept(accept)) {
-      if (splitUntilFit) {
-        throw appError(400, 'invalid_accept', 'splitUntilFit only works with GeoJSON');
+      if (autoSplit) {
+        throw appError(400, 'invalid_accept', 'autoSplit only works with GeoJSON');
       }
       if (bboxTiles !== 1) {
         throw appError(400, 'invalid_bbox_tiles', 'bboxTiles only works with GeoJSON');
       }
-      const binary = await this._rawQuery(
+      return this._rawQuery(
         { ...filterParams, bbox, limit: tileLimit },
         fetchFn,
         sleepFn,
         nowFn,
       );
-      return binary;
     }
 
-    const deadline = timeout == null ? null : nowFn() + timeout * 1000;
-    const checkDeadline = (): void => {
-      if (deadline != null && nowFn() >= deadline) {
-        throw appError(408, 'query_timeout', `query exceeded ${timeout}s timeout`);
+    const finishGeojson = (raw: OSMFeaturesResult): OSMGeoJSONResult => {
+      if (raw.data instanceof ArrayBuffer) {
+        throw appError(400, 'invalid_accept', 'query expected GeoJSON');
       }
-    };
-
-    const queryTile = async (tile: string | undefined): Promise<unknown[] | null> => {
-      try {
-        const raw = await this._rawQuery(
-          { ...filterParams, bbox: tile, limit: tileLimit },
-          fetchFn,
-          sleepFn,
-          nowFn,
-        );
-        if (raw.data instanceof ArrayBuffer) {
-          throw appError(400, 'invalid_accept', 'query expected GeoJSON');
-        }
-        if (raw.meta.has_more) {
-          apiTruncated = true;
-        }
-        return Array.isArray(raw.data.features) ? raw.data.features : [];
-      } catch (error) {
-        if (isResultTooLarge(error) && splitUntilFit) {
-          return null;
-        }
-        throw error;
+      const features = Array.isArray(raw.data.features) ? raw.data.features : [];
+      const meta: OSMFeaturesMeta = {
+        returned: features.length,
+        has_more: raw.meta.has_more,
+      };
+      if (raw.meta.units_charged != null) {
+        meta.units_charged = raw.meta.units_charged;
       }
+      return resultFromFeatures(features, meta);
     };
 
     if (typeof bbox !== 'string') {
       if (bboxTiles !== 1) {
         throw appError(400, 'invalid_bbox_tiles', 'bboxTiles requires bbox');
       }
+      if (autoSplit) {
+        throw appError(400, 'invalid_auto_split', 'autoSplit requires bbox');
+      }
+      return finishGeojson(
+        await this._rawQuery(
+          { ...filterParams, limit: tileLimit },
+          fetchFn,
+          sleepFn,
+          nowFn,
+        ),
+      );
+    }
+
+    // autoSplit off: one GET. No count, no tile walk.
+    if (!autoSplit && bboxTiles === 1) {
+      return finishGeojson(
+        await this._rawQuery(
+          { ...filterParams, bbox, limit: tileLimit },
+          fetchFn,
+          sleepFn,
+          nowFn,
+        ),
+      );
+    }
+
+    const fetchTile = async (tile: string): Promise<unknown[]> => {
       const raw = await this._rawQuery(
-        { ...filterParams, limit: tileLimit },
+        { ...filterParams, bbox: tile, limit: tileLimit },
         fetchFn,
         sleepFn,
         nowFn,
@@ -1162,32 +1730,19 @@ export class OSMFeatures {
       if (raw.data instanceof ArrayBuffer) {
         throw appError(400, 'invalid_accept', 'query expected GeoJSON');
       }
-      let features = Array.isArray(raw.data.features) ? raw.data.features : [];
-      let truncated = raw.meta.has_more;
-      if (maxFeatures != null && features.length > maxFeatures) {
-        features = features.slice(0, maxFeatures);
-        truncated = true;
+      if (raw.meta.has_more) {
+        apiTruncated = true;
       }
-      const meta: OSMFeaturesMeta = {
-        returned: features.length,
-        has_more: truncated,
-      };
       if (raw.meta.units_charged != null) {
-        meta.units_charged = raw.meta.units_charged;
+        unitsCharged += raw.meta.units_charged;
+        sawUnitsCharged = true;
       }
-      return resultFromFeatures(features, meta);
-    }
+      return Array.isArray(raw.data.features) ? raw.data.features : [];
+    };
 
-    const matchCount = async (tile: string): Promise<number | null> => {
-      const key = countGroupKey(tags);
-      if (key == null) {
-        return null;
-      }
-      const stat: OSMFeaturesCountParams = { groupBy: key, bbox: tile, limit: 1 };
-      if (location != null) stat.location = location;
-      if (radius != null) stat.radius = radius;
+    const matchCount = async (tile: string): Promise<number> => {
+      const stat: OSMFeaturesCountParams = { bbox: tile };
       if (type != null) stat.type = type;
-      if (within != null) stat.within = within;
       if (tags != null) stat.tags = tags;
       if (orTags != null) stat.orTags = orTags;
       if (notTags != null) stat.notTags = notTags;
@@ -1199,78 +1754,42 @@ export class OSMFeatures {
       if (way != null) stat.wayShape = way;
       if (disableBudgetWarning) stat.disableBudgetWarning = true;
       const body = await this.count(stat, { fetchFn, sleepFn, nowFn });
-      return Number(body.total);
+      if (typeof body.total !== 'number' || !Number.isFinite(body.total)) {
+        throw new Error('count response must include total');
+      }
+      return Math.trunc(body.total);
     };
 
-    const tiles: Array<[string, number]> = splitBbox(bbox, bboxTiles).map((tile) => [tile, 0]);
+    let tileCap = 1;
+    if (autoSplit) {
+      const tier = await this.account_tier({ fetchFn, sleepFn, nowFn });
+      tileCap = matchSplitCap(tileLimit, maxLimitFromTier(tier));
+    }
+
     const featureLists: unknown[][] = [];
-    let count = 0;
-    let truncated = false;
-    let started = false;
-    const tileCap = tileLimit ?? V3_SPLIT_WHEN_LIMIT_OMITTED;
-
-    const enqueueQuarters = (tile: string, depth: number): void => {
-      if (depth >= V3_SPLIT_DEPTH) {
-        throw new Error(`query tile still overflows after ${V3_SPLIT_DEPTH} splits: ${tile}`);
-      }
-      for (const quarter of splitBbox(tile, 4)) {
-        tiles.push([quarter, depth + 1]);
-      }
-    };
-
-    while (tiles.length > 0) {
-      if (started) {
-        checkDeadline();
-      }
-      started = true;
-      if (maxFeatures != null && count >= maxFeatures) {
-        truncated = true;
-        break;
-      }
-      const next = tiles.shift();
-      if (next == null) {
-        break;
-      }
-      const [tile, depth] = next;
-      if (splitUntilFit) {
-        const total = await matchCount(tile);
-        if (total != null && total > tileCap) {
-          enqueueQuarters(tile, depth);
-          continue;
-        }
-        if (total === 0) {
-          continue;
-        }
-      }
-      const tileFeatures = await queryTile(tile);
-      if (tileFeatures == null) {
-        enqueueQuarters(tile, depth);
-        continue;
-      }
-      if (maxFeatures != null) {
-        const room = maxFeatures - count;
-        if (tileFeatures.length > room) {
-          if (room > 0) {
-            featureLists.push(tileFeatures.slice(0, room));
-          }
-          count += Math.max(room, 0);
-          truncated = true;
-          break;
-        }
-      }
+    for await (const tileFeatures of iterSplitTiles({
+      bbox,
+      bboxTiles,
+      autoSplit,
+      timeout,
+      nowFn,
+      tileCap,
+      matchCount: autoSplit ? matchCount : null,
+      fetchTile,
+      overflowName: 'query',
+    })) {
       featureLists.push(tileFeatures);
-      count += tileFeatures.length;
     }
 
-    let allFeatures = dedupeFeatures(featureLists.flat());
-    if (maxFeatures != null && allFeatures.length > maxFeatures) {
-      allFeatures = allFeatures.slice(0, maxFeatures);
-      truncated = true;
-    }
-    return resultFromFeatures(allFeatures, {
+    const allFeatures = dedupeFeatures(featureLists.flat());
+    const meta: OSMFeaturesMeta = {
       returned: allFeatures.length,
-      has_more: truncated || apiTruncated,
-    });
+      has_more: apiTruncated,
+    };
+    if (sawUnitsCharged) {
+      meta.units_charged = unitsCharged;
+    }
+    return resultFromFeatures(allFeatures, meta);
   }
 
   /** Same as ``query``. */
@@ -1281,14 +1800,20 @@ export class OSMFeatures {
     return this.query(params, dependencies);
   }
 
-  /** Count features grouped by a tag key (``GET /v2/osm_features/count``). */
+  /** Count features, optionally grouped by a tag key (``GET /v2/osm_features/count``). */
   async count(
     params: OSMFeaturesCountParams,
     dependencies: OSMFeaturesDependencies = {},
   ): Promise<OSMCountResponse> {
-    if (!params.groupBy) {
-      throw appError(400, 'invalid_group_by', 'group_by is required.');
-    }
+    assertExclusiveSpatial({
+      bbox: params.bbox,
+      location: params.location,
+      radius: params.radius,
+      within: params.within,
+      tags: params.tags,
+      orTags: params.orTags,
+      notTags: params.notTags,
+    });
     const body = await this._getJson(
       '/v2/osm_features/count',
       buildFeaturesQuery({
@@ -1316,6 +1841,70 @@ export class OSMFeatures {
     return body as OSMCountResponse;
   }
 
+  /** Occupied grid bins (``GET /v2/osm_features/density``). Points with ``properties.count``, not OSM features. */
+  async density(
+    params: OSMFeaturesDensityParams,
+    dependencies: OSMFeaturesDependencies = {},
+  ): Promise<OSMDensityResponse> {
+    assertExclusiveSpatial({
+      bbox: params.bbox,
+      location: params.location,
+      radius: params.radius,
+      within: params.within,
+      tags: params.tags,
+      orTags: params.orTags,
+      notTags: params.notTags,
+    });
+    const body = await this._getJson(
+      '/v2/osm_features/density',
+      buildFeaturesQuery({
+        bbox: params.bbox,
+        tags: params.tags,
+        orTags: params.orTags,
+        notTags: params.notTags,
+        type: params.type,
+        wayShape: params.wayShape ?? params.shape,
+        limit: params.limit,
+        location: params.location,
+        radius: params.radius,
+        within: params.within,
+        cellDeg: params.cellDeg,
+        minLengthM: params.minLengthM,
+        maxLengthM: params.maxLengthM,
+        minAreaM2: params.minAreaM2,
+        maxAreaM2: params.maxAreaM2,
+        disableBudgetWarning: params.disableBudgetWarning,
+      }),
+      dependencies.fetchFn ?? fetch,
+      dependencies.sleepFn ?? sleep,
+      dependencies.nowFn ?? Date.now,
+    );
+    return body as OSMDensityResponse;
+  }
+
+  /**
+   * This API key's plan limits (``GET /v1/account/tier``). Cached for 5 minutes.
+   * ``autoSplit`` uses ``max_limit`` as the density-split threshold.
+   */
+  async account_tier(
+    dependencies: OSMFeaturesDependencies = {},
+  ): Promise<Record<string, unknown>> {
+    const nowFn = dependencies.nowFn ?? Date.now;
+    const cached = this.accountTierCache;
+    if (cached != null && nowFn() < cached.expiresAt) {
+      return { ...cached.body };
+    }
+    const body = await this._getJson(
+      ACCOUNT_TIER_PATH,
+      {},
+      dependencies.fetchFn ?? fetch,
+      dependencies.sleepFn ?? sleep,
+      nowFn,
+    );
+    this.accountTierCache = { body, expiresAt: nowFn() + ACCOUNT_TIER_CACHE_MS };
+    return { ...body };
+  }
+
   /** This month's unit-budget usage (``GET /v1/usage``). */
   async usage(dependencies: OSMFeaturesDependencies = {}): Promise<Record<string, unknown>> {
     return this._getJson(
@@ -1327,21 +1916,97 @@ export class OSMFeatures {
     );
   }
 
-  /** Find places in a bbox or radius (``POST /v1/places/search``). Features have ``properties.openNow`` when hours are known. ``metadata.units`` is credits charged. */
+  /**
+   * Find places in a bbox or radius (``POST /v1/places/search``).
+   * Features have ``properties.openNow`` when hours are known.
+   * ``metadata.units`` is credits charged. After ``bboxTiles`` / ``autoSplit``,
+   * ``units`` is the sum of the search tiles.
+   *
+   * Places are nodes plus polygon POIs. There is no ``type`` filter (use
+   * ``query()`` for OSM element type).
+   * ``bboxTiles`` and ``autoSplit`` only apply to bbox search. ``autoSplit``
+   * counts first via ``GET /v2/osm_features/count`` with ``way_shape=polygon``.
+   * No hours: split on ``total`` vs the key's ``max_limit``. ``asOf`` / ``openNow``
+   * AND ``opening_hours``. An ``asOf`` page ``limit`` truncates; density-split
+   * vs the 10k parse cap only when ``limit`` is raised above 10k. ``openNow``
+   * density-splits vs that 10k scan cap even with a small fill limit.
+   * ``splitUntilFit`` is a deprecated alias for ``autoSplit``.
+   */
   async places_search(
     params: PlacesSearchParams,
     dependencies: OSMFeaturesDependencies = {},
   ): Promise<Record<string, unknown>> {
-    return this._postJson(
-      '/v1/places/search',
-      placesSearchBody(params),
-      dependencies.fetchFn ?? fetch,
-      dependencies.sleepFn ?? sleep,
-      dependencies.nowFn ?? Date.now,
-    );
+    const fetchFn = dependencies.fetchFn ?? fetch;
+    const sleepFn = dependencies.sleepFn ?? sleep;
+    const nowFn = dependencies.nowFn ?? Date.now;
+    const bboxTiles = params.bboxTiles ?? 1;
+    const autoSplit = foldAutoSplit(params.autoSplit ?? false, params.splitUntilFit);
+    const timeout = params.timeout === undefined ? DEFAULT_QUERY_TIMEOUT_S : params.timeout;
+    if (bboxTiles !== 1 && typeof params.bbox !== 'string') {
+      throw new Error('bboxTiles only applies to bbox search, not location+radius');
+    }
+    if (autoSplit && typeof params.bbox !== 'string') {
+      throw new Error('autoSplit only applies to bbox search, not location+radius');
+    }
+    if (bboxTiles === 1 && !autoSplit) {
+      return this._postJson('/v1/places/search', placesSearchBody(params), fetchFn, sleepFn, nowFn);
+    }
+
+    const bbox = params.bbox;
+    if (typeof bbox !== 'string') {
+      throw new Error('autoSplit only applies to bbox search, not location+radius');
+    }
+    const hoursOn = Boolean(params.openNow || params.asOf != null);
+    const countTags = [...(params.tags ?? [])];
+    if (hoursOn) {
+      countTags.push('opening_hours');
+    }
+    let tileCap = 1;
+    if (autoSplit && !hoursOn) {
+      const tier = await this.account_tier({ fetchFn, sleepFn, nowFn });
+      tileCap = matchSplitCap(params.limit, maxLimitFromTier(tier));
+    } else if (autoSplit) {
+      tileCap = hoursParseSplitCap(params.limit, Boolean(params.openNow));
+    }
+
+    const fetchTile = (tile: string): Promise<Record<string, unknown>> =>
+      this._postJson(
+        '/v1/places/search',
+        placesSearchBody({ ...params, bbox: tile }),
+        fetchFn,
+        sleepFn,
+        nowFn,
+      );
+
+    const matchCount = async (tile: string): Promise<number> => {
+      const stat: OSMFeaturesCountParams = { bbox: tile, wayShape: 'polygon' };
+      if (countTags.length > 0) stat.tags = countTags;
+      if (params.orTags != null) stat.orTags = params.orTags;
+      const body = await this.count(stat, { fetchFn, sleepFn, nowFn });
+      if (typeof body.total !== 'number' || !Number.isFinite(body.total)) {
+        throw new Error('count response must include total');
+      }
+      return Math.trunc(body.total);
+    };
+
+    const payloads: Record<string, unknown>[] = [];
+    for await (const page of iterSplitTiles({
+      bbox,
+      bboxTiles,
+      autoSplit,
+      timeout,
+      nowFn,
+      tileCap,
+      matchCount: autoSplit ? matchCount : null,
+      fetchTile,
+      overflowName: 'places_search',
+    })) {
+      payloads.push(page);
+    }
+    return mergePlaceCollections(payloads);
   }
 
-  /** Nearest places from a point (``POST /v1/places/nearby``). Features have ``properties.openNow`` when hours are known. ``units`` is credits charged. */
+  /** Nearest places from a point (``POST /v1/places/nearby``). Nodes plus polygon POIs; no ``type`` filter. Features have ``properties.openNow`` when hours are known. ``units`` is credits charged. */
   async places_nearby(
     params: PlacesNearbyParams,
     dependencies: OSMFeaturesDependencies = {},

@@ -11,6 +11,7 @@ The backend is dedicated PostGIS, not the public Overpass endpoint, with API key
   - [query()](#query)
   - [Query a large bbox](#query-a-large-bbox)
   - [count](#count)
+  - [density](#density)
   - [usage](#usage)
 - [Places and routes](#places-and-routes)
   - [Places search](#places-search)
@@ -74,7 +75,7 @@ Talks to `https://api.maplark.com` by default.
 
 `query()` calls `GET /v3/osm_features` and returns the whole tile. Returns `{ data, meta }` where `data` is a GeoJSON FeatureCollection (default) or an `ArrayBuffer` for binary encodings.
 
-Omit `limit` for the API default. Paid keys may raise `limit` up to their `max_limit` (enterprise 1000000). A larger match set is truncated (`X-Has-More: true`). Pass `splitUntilFit: true` to quarter the bbox until each piece fits. That adds latency. Pass `bboxTiles: 2` (or 4, 8, ...) to split the bbox up front. `query` does not take `cursor`.
+Omit `limit` for the API default. Paid keys may raise `limit` up to their `max_limit` (enterprise 1000000). A larger match set is truncated (`X-Has-More: true`). Pass `autoSplit: true` to read `max_limit` from `GET /v1/account/tier`, count first, and jump to a power-of-2 tile grid when the match set exceeds that cap (one extra jump if a leftover leaf is still dense). A lower `limit` truncates and does not split. A bbox-area 400 jumps to the tile size in the error, up to 32 tiles. That adds latency. Pass `bboxTiles: 2` (or 4, 8, ...) to split the bbox up front. `splitUntilFit` is a deprecated alias for `autoSplit`. `query` does not take `cursor`.
 
 #### Spatial anchors (required)
 
@@ -116,7 +117,7 @@ Geometric filters such specific OSM element type, min length, or including centr
 | `type`       | `string`               | all     | OSM element types, e.g. `node`, `way`, `relation`, or comma-separated (`way,relation`). |
 | `wayShape`   | `line | polygon | all` | `all`   | Geometry class for ways and relations. `shape` is a deprecated alias.                   |
 | `centroid`   | `boolean`              | `false` | When `true`, include a centroid on non-point features.                                  |
-| `clipGeometry` | `boolean`            | `true`  | When `true`, clip returned geometry to the requested `bbox`. Set `false` for full geometry. |
+| `clipGeometry` | `boolean`            | `false` | When `true`, clip returned geometry to the requested `bbox`. Omit or `false` for full geometry. |
 | `minLengthM` | `number`               |         | Minimum length in metres (lines).                                                       |
 | `maxLengthM` | `number`               |         | Maximum length in metres (lines).                                                       |
 | `minAreaM2`  | `number`               |         | Minimum area in square metres (polygons).                                               |
@@ -134,8 +135,7 @@ Output format, tiling, and budget.
 | ---------------------- | --------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `accept`               | `string`  | `application/geo+json` | Response media type in header. Options - `application/geo+json`, `text/csv`, `text/tab-separated-values`, `application/flatgeobuf`, and `application/vnd.apache.parquet`. |
 | `bboxTiles`            | `number`        | `1`                    | Split `bbox` into this many tiles (must be a power of 2: `1`, `2`, `4`, `8`, …). Use when a bbox exceeds your tier area cap.                                              |
-| `splitUntilFit`        | `boolean`       | `false`                | On a truncated tile, count matches and quarter the bbox until each piece fits. Adds latency.                                                                           |
-| `maxFeatures`          | `number | null` | `1000000`              | Cap on merged features after dedupe. Pass `null` for no cap.                                                                                                              |
+| `autoSplit`            | `boolean`       | `false`                | Count first, then fetch. Jumps to a power-of-2 grid when matches exceed the key's `max_limit`. Caps at 32 tiles. `splitUntilFit` is a deprecated alias.                |
 | `timeout`              | `number | null` | `60`                   | Wall-clock seconds for this call. Pass `null` for no cap.                                                                                                                 |
 | `zoom`                 | `number`  |                        | Map zoom hint (used by presets / server-side simplification policies).                                                                                                    |
 
@@ -147,8 +147,8 @@ Output format, tiling, and budget.
 | Field           | Description                                    |
 | --------------- | ---------------------------------------------- |
 | `returned`      | Features in the merged result.                 |
-| `has_more`      | `true` if the client trimmed to `maxFeatures`. |
-| `units_charged` | Usage for a single-request call when present.  |
+| `has_more`      | `true` when the tile was truncated (`X-Has-More`). |
+| `units_charged` | Usage when present. After `bboxTiles` / `autoSplit`, the sum of the feature tiles. |
 
 
 
@@ -158,8 +158,7 @@ Use this to query a larger bbox than what is allowed by splitting the bbox up in
 const allRestaurants = await client.query({
   bbox: '18.063,59.322,18.082,59.332',
   tags: ['amenity=restaurant'],
-  splitUntilFit: true,
-  maxFeatures: 1_000_000,
+  autoSplit: true,
   timeout: 60,
 });
 ```
@@ -169,13 +168,20 @@ const allRestaurants = await client.query({
 
 Also exports layer presets (`resolveLayerFromQuery`, `OSM_FEATURES_LAYER_PRESETS`, ...),
 GeoJSON payload helpers (`featureCentroid`, `geometryBounds`, `parseFeatureId`, ...),
-and local helpers (`nearest_within`, `point_in_geometry`, `isOpenNow`).
+and local helpers (`nearest_within`, `pairs_within`, `around_to_bbox`, `point_in_geometry`, `isOpenNow`).
 
 ## `count`
 
-Count features grouped by a tag key via `GET /v2/osm_features/count`. Returns `{ groups, total, truncated }`. Spatial windows are larger than `query` (country-scale on every tier) and billed count-only. `limit` is max histogram buckets (API default 100), not a scan cap. `groupBy` is required. Same tag filters as `query`; no `osmIds`, `zoom`, `centroid`, or `clipGeometry`. Map Express/query strings with `resolveCountRequest` (requires `group_by`).
+Count features via `GET /v2/osm_features/count`. Returns `{ groups, total, truncated }`. Spatial windows are larger than `query` (country-scale on every tier) and billed count-only. `limit` is max histogram buckets (API default 100), not a scan cap. Omit `groupBy` for a scalar total (`groups` is empty). Same tag filters as `query`; no `osmIds`, `zoom`, `centroid`, or `clipGeometry`. Map Express/query strings with `resolveCountRequest`.
 
 ```ts
+const total = await client.count({
+  bbox: '18.05,59.32,18.10,59.34',
+  type: 'node',
+  tags: ['amenity'],
+});
+console.log(total.total);
+
 const histogram = await client.count({
   groupBy: 'amenity',
   bbox: '18.05,59.32,18.10,59.34',
@@ -193,6 +199,22 @@ const mix = await client.count({
   within: 'relation/398021',
   tags: ['amenity'],
 });
+```
+
+## `density`
+
+Where features are dense, via `GET /v2/osm_features/density`. Returns a GeoJSON FeatureCollection of occupied grid points (`properties.count`) plus `total` and `truncated`. Not OSM features. Omit `cellDeg` for 0.1. `type` omitted is nodes. `tags` or `orTags` is required. `limit` is max occupied cells. Map query strings with `resolveDensityRequest`.
+
+A Europe box (`-26,33,52,72`) fits the density area cap and needs `disableBudgetWarning: true` when the per-request unit cap 400s. Count of that box still 400s on area. A unit-cap 400 on count can pass the same flag.
+
+```ts
+const bins = await client.density({
+  bbox: '-26,33,52,72',
+  tags: ['place'],
+  cellDeg: 0.1,
+  disableBudgetWarning: true,
+});
+console.log(bins.total, bins.features.length, bins.truncated);
 ```
 
 ## `usage`
@@ -213,6 +235,15 @@ Unset fields are omitted so server defaults apply (`places_search` limit 100, `p
 ### Places search
 
 `places_search()` looks up POIs inside a bounding box **or** around `{ lat, lon }` + `radius` (pick one). `tags` is AND; `orTags` is OR; both use the same OSM keys as `query()`. Leave `limit` off for the API default (100, max 10_000).
+
+`bboxTiles` and `autoSplit` only apply to bbox search (same walk as `query`). `autoSplit` counts with `way_shape=polygon`, then fetches. No hours: split on `total` vs the key's `max_limit`. With `asOf` / `openNow`, the count ANDs `opening_hours`. An `asOf` page `limit` truncates; density-split vs the 10k parse cap only when `limit` is raised above 10k. `openNow` density-splits vs that 10k scan cap even with a small fill limit. After tiling, `metadata.units` is the sum of the tiles. location+radius cannot split. To tile a radius window, convert it first with `around_to_bbox` (a square that contains the circle; corner hits can fall outside the original radius):
+
+```ts
+import { around_to_bbox } from 'osmfeatures';
+
+const bbox = around_to_bbox(18.075, 59.316, 800);
+const cafes = await client.places_search({ bbox, orTags: ['amenity=cafe'], autoSplit: true });
+```
 
 ```ts
 const origin = { lat: 59.316, lon: 18.075 };
@@ -282,6 +313,14 @@ for (const pair of pairs) {
 
 Each pair is `{ feature, distance_m, nearest }`. The point is `geometry` when it is a Point, otherwise `properties.centroid` (same as `featureCentroid`). Neither present throws. Empty secondary → `[]`. Distances are spherical haversine (mean Earth radius 6371000 m). `limit` keeps the closest pairs (default 20); `{ limit: null }` returns every primary with a match. More than 500000 comparisons throws — lower `places_search` / `places_nearby` `limit`, do not dump a large `query()` result. `{ data, meta }` from `query()` is accepted.
 
+`pairs_within` returns every pair in a distance band, not just the nearest neighbour. Same comparison cap. Pass the same collection twice for a self-join (each unordered pair once):
+
+```ts
+import { pairs_within } from 'osmfeatures';
+
+const allPairs = pairs_within(restaurants, stations, 150, { limit: 20 });
+```
+
 ### Walk and bike routes
 
 Paths follow OSM walk and bicycle ways. Default `travelMode` is `WALK`; pass `'BICYCLE'` for bikes. Driving is not offered yet.
@@ -310,7 +349,7 @@ const office = { lon: 18.08, lat: 59.318 };
 point_in_geometry(office.lon, office.lat, iso);
 ```
 
-In-process (no HTTP): `nearest_within(primary, secondary, maxDistanceM)` for proximity joins, `point_in_geometry(lon, lat, geom)` for isochrone containment. The latter accepts a Polygon/MultiPolygon, a Feature, a GeometryCollection, or `{ geometry }` from the isochrone response.
+In-process (no HTTP): `nearest_within` / `pairs_within` for proximity joins, `around_to_bbox` to tile a radius window, `point_in_geometry(lon, lat, geom)` for isochrone containment. The latter accepts a Polygon/MultiPolygon, a Feature, a GeometryCollection, or `{ geometry }` from the isochrone response.
 
 
 ## MCP server

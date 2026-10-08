@@ -123,3 +123,87 @@ export function nearest_within(
   pairs.sort((a, b) => a.distance_m - b.distance_m);
   return limit == null ? pairs : pairs.slice(0, limit);
 }
+
+/**
+ * All primary/secondary pairs with `minDistanceM <= d <= maxDistanceM`.
+ *
+ * Same point/centroid rules and comparison cap as `nearest_within`.
+ * Sorted by `distance_m`, then sliced to `limit` (SDK default 20; pass
+ * `null` for every pair). Same-collection calls (`primary === secondary`)
+ * emit each unordered pair once, skip a feature paired with itself, and
+ * count `n(n-1)/2` toward the comparison cap.
+ */
+export function pairs_within(
+  primary: unknown,
+  secondary: unknown,
+  maxDistanceM: number,
+  {
+    minDistanceM = 0,
+    limit = 20,
+    maxComparisons = MAX_COMPARISONS,
+  }: {
+    minDistanceM?: number;
+    limit?: number | null;
+    maxComparisons?: number | null;
+  } = {},
+): NearestWithinPair[] {
+  if (limit != null && limit < 1) {
+    throw new Error('limit must be a positive int');
+  }
+  if (maxComparisons != null && maxComparisons < 1) {
+    throw new Error('max_comparisons must be a positive int');
+  }
+  if (minDistanceM < 0) {
+    throw new Error('min_distance_m must be greater than or equal to 0');
+  }
+  if (minDistanceM > maxDistanceM) {
+    throw new Error('min_distance_m must be less than or equal to max_distance_m');
+  }
+
+  const sameCollection = primary === secondary;
+  const primaries = features(primary);
+  const secondaries = sameCollection ? primaries : features(secondary);
+  if (primaries.length === 0 || secondaries.length === 0) {
+    return [];
+  }
+
+  const n = primaries.length;
+  const m = secondaries.length;
+  const comparisons = sameCollection ? (n * (n - 1)) / 2 : n * m;
+  if (maxComparisons != null && comparisons > maxComparisons) {
+    const shape = sameCollection ? `${n} self-join` : `${n}×${m}`;
+    throw new Error(
+      `pairs_within join is ${shape} comparisons `
+      + `(cap ${maxComparisons}). Shrink the collections `
+      + '(places_search/nearby limit, not a large query()).',
+    );
+  }
+
+  const pairs: NearestWithinPair[] = [];
+  if (sameCollection) {
+    const pts: Array<[unknown, [number, number]]> = primaries.map((p) => [p, lonLat(p)]);
+    for (let i = 0; i < pts.length; i += 1) {
+      const [p, [plon, plat]] = pts[i]!;
+      for (let j = i + 1; j < pts.length; j += 1) {
+        const [s, [slon, slat]] = pts[j]!;
+        const d = haversineM(plon, plat, slon, slat);
+        if (minDistanceM <= d && d <= maxDistanceM) {
+          pairs.push({ feature: p, distance_m: d, nearest: s });
+        }
+      }
+    }
+  } else {
+    const secPts: Array<[unknown, [number, number]]> = secondaries.map((s) => [s, lonLat(s)]);
+    for (const p of primaries) {
+      const [plon, plat] = lonLat(p);
+      for (const [s, [slon, slat]] of secPts) {
+        const d = haversineM(plon, plat, slon, slat);
+        if (minDistanceM <= d && d <= maxDistanceM) {
+          pairs.push({ feature: p, distance_m: d, nearest: s });
+        }
+      }
+    }
+  }
+  pairs.sort((a, b) => a.distance_m - b.distance_m);
+  return limit == null ? pairs : pairs.slice(0, limit);
+}
