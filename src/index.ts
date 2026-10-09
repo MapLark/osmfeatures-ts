@@ -23,11 +23,8 @@ export type OSMFeaturesMeta = {
   returned: number;
   /** True when the tile was truncated (``X-Has-More``). */
   has_more: boolean;
-  /**
-   * From ``X-Usage-Units-Charged`` when present (authenticated API).
-   * After ``bboxTiles`` / ``autoSplit``, the sum of the feature tiles.
-   */
-  units_charged?: number;
+  /** Upstream HTTP response headers (includes ``X-Usage-Units-Charged`` when billed). */
+  response_headers?: Record<string, string>;
 };
 
 /** Wire GeoJSON FeatureCollection. */
@@ -58,19 +55,22 @@ function resultFromFeatures(
   };
 }
 
+function headersToRecord(headers: Headers): Record<string, string> {
+  const out: Record<string, string> = {};
+  headers.forEach((value, key) => {
+    out[key] = value;
+  });
+  return out;
+}
+
 function metaFromHeaders(headers: Headers, featureCount: number): OSMFeaturesMeta {
   const returnedRaw = headers.get('X-Returned');
   const parsed = returnedRaw != null && returnedRaw !== '' ? Number.parseInt(returnedRaw, 10) : Number.NaN;
-  const unitsRaw = headers.get('X-Usage-Units-Charged');
-  const unitsParsed = unitsRaw != null && unitsRaw !== '' ? Number(unitsRaw) : Number.NaN;
-  const meta: OSMFeaturesMeta = {
+  return {
     returned: Number.isFinite(parsed) ? parsed : featureCount,
     has_more: (headers.get('X-Has-More') ?? '').trim().toLowerCase() === 'true',
+    response_headers: headersToRecord(headers),
   };
-  if (Number.isFinite(unitsParsed)) {
-    meta.units_charged = unitsParsed;
-  }
-  return meta;
 }
 
 /** Layer filters from presets / custom resolve. Pass into `resolveRequest` or spread into `query`. */
@@ -153,6 +153,7 @@ export type OSMCountResponse = {
   groups: OSMCountGroup[];
   total: number;
   truncated: boolean;
+  response_headers?: Record<string, string>;
 };
 
 /** `GET /v2/osm_features/density`. Same filters as `count` except no `groupBy`. */
@@ -191,6 +192,7 @@ export type OSMDensityResponse = {
   total: number;
   truncated: boolean;
   hint?: string;
+  response_headers?: Record<string, string>;
 };
 
 type QueryValue = unknown;
@@ -310,6 +312,8 @@ type OSMFeaturesDependencies = {
 };
 
 const DEFAULT_BASE_URL = 'https://api.maplark.com';
+/** HTTP timeout in ms. Above count/density statement timeout of 600s so a query_timeout JSON body arrives. */
+export const DEFAULT_TIMEOUT_MS = 610_000;
 const V3_PATH = '/v3/osm_features';
 const ACCOUNT_TIER_PATH = '/v1/account/tier';
 /** How long ``account_tier`` / ``autoSplit`` reuse ``GET /v1/account/tier``. */
@@ -1257,7 +1261,7 @@ export class OSMFeatures {
     apiKey: string,
     {
       apiBaseUrl = DEFAULT_BASE_URL,
-      timeoutMs = 30_000,
+      timeoutMs = DEFAULT_TIMEOUT_MS,
       retryAttempts = 3,
       retryBaseMs = 750,
       retryMaxMs = 15_000,
@@ -1518,7 +1522,7 @@ export class OSMFeatures {
     fetchFn: typeof fetch,
     sleepFn: (ms: number) => Promise<void>,
     nowFn: () => number,
-  ): Promise<Record<string, unknown>> {
+  ): Promise<{ body: Record<string, unknown>; meta: OSMFeaturesMeta }> {
     const url = new URL(`${this.apiBaseUrl}${path}`);
     const entries = query instanceof URLSearchParams ? query.entries() : Object.entries(query);
     for (const [key, value] of entries) {
@@ -1538,7 +1542,8 @@ export class OSMFeatures {
       sleepFn,
       nowFn,
     );
-    return (await upstream.json()) as Record<string, unknown>;
+    const body = (await upstream.json()) as Record<string, unknown>;
+    return { body, meta: metaFromHeaders(upstream.headers, 0) };
   }
 
   /** Single HTTP request with retry. Throws on non-OK (same role as Python `_raw_query`). */
@@ -1634,9 +1639,6 @@ export class OSMFeatures {
     });
     const tileLimit = resolveQueryLimit(limit);
     let apiTruncated = false;
-    let unitsCharged = 0;
-    let sawUnitsCharged = false;
-
     const fetchFn = dependencies.fetchFn ?? fetch;
     const sleepFn = dependencies.sleepFn ?? sleep;
     const nowFn = dependencies.nowFn ?? Date.now;
@@ -1681,14 +1683,11 @@ export class OSMFeatures {
         throw appError(400, 'invalid_accept', 'query expected GeoJSON');
       }
       const features = Array.isArray(raw.data.features) ? raw.data.features : [];
-      const meta: OSMFeaturesMeta = {
+      return resultFromFeatures(features, {
         returned: features.length,
         has_more: raw.meta.has_more,
-      };
-      if (raw.meta.units_charged != null) {
-        meta.units_charged = raw.meta.units_charged;
-      }
-      return resultFromFeatures(features, meta);
+        response_headers: raw.meta.response_headers,
+      });
     };
 
     if (typeof bbox !== 'string') {
@@ -1732,10 +1731,6 @@ export class OSMFeatures {
       }
       if (raw.meta.has_more) {
         apiTruncated = true;
-      }
-      if (raw.meta.units_charged != null) {
-        unitsCharged += raw.meta.units_charged;
-        sawUnitsCharged = true;
       }
       return Array.isArray(raw.data.features) ? raw.data.features : [];
     };
@@ -1782,14 +1777,10 @@ export class OSMFeatures {
     }
 
     const allFeatures = dedupeFeatures(featureLists.flat());
-    const meta: OSMFeaturesMeta = {
+    return resultFromFeatures(allFeatures, {
       returned: allFeatures.length,
       has_more: apiTruncated,
-    };
-    if (sawUnitsCharged) {
-      meta.units_charged = unitsCharged;
-    }
-    return resultFromFeatures(allFeatures, meta);
+    });
   }
 
   /** Same as ``query``. */
@@ -1814,7 +1805,7 @@ export class OSMFeatures {
       orTags: params.orTags,
       notTags: params.notTags,
     });
-    const body = await this._getJson(
+    const { body, meta } = await this._getJson(
       '/v2/osm_features/count',
       buildFeaturesQuery({
         bbox: params.bbox,
@@ -1838,7 +1829,9 @@ export class OSMFeatures {
       dependencies.sleepFn ?? sleep,
       dependencies.nowFn ?? Date.now,
     );
-    return body as OSMCountResponse;
+    const out = body as OSMCountResponse;
+    out.response_headers = meta.response_headers;
+    return out;
   }
 
   /** Occupied grid bins (``GET /v2/osm_features/density``). Points with ``properties.count``, not OSM features. */
@@ -1855,7 +1848,7 @@ export class OSMFeatures {
       orTags: params.orTags,
       notTags: params.notTags,
     });
-    const body = await this._getJson(
+    const { body, meta } = await this._getJson(
       '/v2/osm_features/density',
       buildFeaturesQuery({
         bbox: params.bbox,
@@ -1879,7 +1872,9 @@ export class OSMFeatures {
       dependencies.sleepFn ?? sleep,
       dependencies.nowFn ?? Date.now,
     );
-    return body as OSMDensityResponse;
+    const out = body as OSMDensityResponse;
+    out.response_headers = meta.response_headers;
+    return out;
   }
 
   /**
@@ -1894,7 +1889,7 @@ export class OSMFeatures {
     if (cached != null && nowFn() < cached.expiresAt) {
       return { ...cached.body };
     }
-    const body = await this._getJson(
+    const { body } = await this._getJson(
       ACCOUNT_TIER_PATH,
       {},
       dependencies.fetchFn ?? fetch,
@@ -1907,13 +1902,14 @@ export class OSMFeatures {
 
   /** This month's unit-budget usage (``GET /v1/usage``). */
   async usage(dependencies: OSMFeaturesDependencies = {}): Promise<Record<string, unknown>> {
-    return this._getJson(
+    const { body } = await this._getJson(
       '/v1/usage',
       {},
       dependencies.fetchFn ?? fetch,
       dependencies.sleepFn ?? sleep,
       dependencies.nowFn ?? Date.now,
     );
+    return body;
   }
 
   /**
@@ -2026,13 +2022,14 @@ export class OSMFeatures {
     dependencies: OSMFeaturesDependencies = {},
   ): Promise<Record<string, unknown>> {
     const { osmType, osmId } = parsePlaceRef(params.osmType, params.osmId);
-    return this._getJson(
+    const { body } = await this._getJson(
       `/v1/places/${osmType}/${osmId}`,
       {},
       dependencies.fetchFn ?? fetch,
       dependencies.sleepFn ?? sleep,
       dependencies.nowFn ?? Date.now,
     );
+    return body;
   }
 
   /** Reach polygon along the walk/bike network (``POST /v1/routes/isochrone``). ``units`` is credits charged. */

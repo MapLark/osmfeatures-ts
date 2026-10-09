@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import {
+  DEFAULT_TIMEOUT_MS,
   OSMFeatures,
   around_to_bbox,
   isOpenNow,
@@ -9,6 +10,8 @@ import {
   type OSMFeaturesLayer,
   type OSMGeoJSONPayload,
 } from './index.js';
+
+assert.equal(DEFAULT_TIMEOUT_MS, 610_000);
 
 type AppError = Error & {
   status?: number;
@@ -541,12 +544,13 @@ async function main(): Promise<void> {
             total: 4,
             truncated: false,
           }),
-          { status: 200, headers: { 'content-type': 'application/json' } },
+          { status: 200, headers: { 'content-type': 'application/json', 'X-Usage-Units-Charged': '11' } },
         );
       },
     },
   );
   assert.equal(densityOut.total, 4);
+  assert.equal(densityOut.response_headers?.['x-usage-units-charged'], '11');
   assert.equal(densityOut.features[0]?.properties.count, 4);
   assert.equal(densityOut.features[0]?.geometry.type, 'Point');
   assert.equal('id' in (densityOut.features[0] ?? {}), false);
@@ -594,7 +598,7 @@ async function main(): Promise<void> {
     },
   );
   assert.ok(!(billed.data instanceof ArrayBuffer));
-  assert.equal(billed.meta.units_charged, 42);
+  assert.equal(billed.meta.response_headers?.['x-usage-units-charged'], '42');
 
   const retrySleeps: number[] = [];
   const retryResponses = [
@@ -706,7 +710,7 @@ async function main(): Promise<void> {
   assert.deepEqual(tiledUrls.map((url) => url.pathname), ['/v3/osm_features', '/v3/osm_features']);
   assert.deepEqual(tiledPayload.data.features, [feature('way/1'), feature('way/2')]);
   assert.equal(tiledPayload.meta.has_more, false);
-  assert.equal(tiledPayload.meta.units_charged, 9);
+  assert.equal(tiledPayload.meta.response_headers, undefined);
 
   const overflowBbox = '0,0,2,2';
   const overflowTiles = splitBbox(overflowBbox, 4);
@@ -771,7 +775,7 @@ async function main(): Promise<void> {
     overflowTiles[0], overflowTiles[1], overflowTiles[3],
     ...overflowLeaves,
   ]);
-  assert.equal(overflow.meta.units_charged, undefined);
+  assert.equal(overflow.meta.response_headers, undefined);
   assert.equal(featureBboxes.includes(overflowTiles[2]!), false);
   assert.deepEqual(
     overflowUrls
@@ -1030,7 +1034,7 @@ async function main(): Promise<void> {
   assert.deepEqual(new Uint8Array(binary.data), new Uint8Array([0x66, 0x67, 0x62, 0x01]));
   assert.equal(binary.meta.returned, 2);
   assert.equal(binary.meta.has_more, false);
-  assert.equal(binary.meta.units_charged, 7);
+  assert.equal(binary.meta.response_headers?.['x-usage-units-charged'], '7');
 
   await assert.rejects(
     async () => osmFeatures.query({
