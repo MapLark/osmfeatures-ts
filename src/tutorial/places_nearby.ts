@@ -5,7 +5,7 @@ const client = new OSMFeatures(process.env.MAPLARK_API_KEY!, {
 });
 const nearby = await client.places_nearby({
   location: { lat: 59.316, lng: 18.075 },
-  orTags: ['amenity=pharmacy'],
+  tags: ['amenity=pharmacy'],
   radius: 1000,
   limit: 5,
 });

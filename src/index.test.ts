@@ -3,6 +3,8 @@ import {
   DEFAULT_TIMEOUT_MS,
   OSMFeatures,
   around_to_bbox,
+  tagValue,
+  tagValues,
   isOpenNow,
   readOpenNow,
   resolveBboxTiles,
@@ -12,6 +14,15 @@ import {
 } from './index.js';
 
 assert.equal(DEFAULT_TIMEOUT_MS, 610_000);
+
+assert.deepEqual(tagValues('a|b'), ['a|b']);
+assert.deepEqual(tagValues(['a']), ['a']);
+assert.deepEqual(tagValues(['a', 'b']), ['a', 'b']);
+assert.deepEqual(tagValues(['a|b', 'c']), ['a|b', 'c']);
+assert.deepEqual(tagValues([]), []);
+assert.equal(tagValue(['amenity', 'a=1|b=2', '!access=private']), 'amenity,a=1|b=2,!access=private');
+assert.equal(tagValue(['a|(b,c)', 'd']), 'a|(b,c),d');
+assert.equal(tagValue([]), undefined);
 
 type AppError = Error & {
   status?: number;
@@ -36,7 +47,7 @@ const buildingsLayer: OSMFeaturesLayer = {
 
 const foodLayer: OSMFeaturesLayer = {
   bbox: '18.02,59.305,18.115,59.355',
-  orTags: ['amenity=restaurant', 'amenity=cafe'],
+  tags: ['amenity=restaurant|amenity=cafe'],
 };
 
 function feature(id: string): unknown {
@@ -196,8 +207,7 @@ async function main(): Promise<void> {
 
   const taggedLayer: OSMFeaturesLayer = {
     bbox: buildingsLayer.bbox,
-    tags: ['highway'],
-    notTags: ['highway=footway', 'highway=path'],
+    tags: ['highway', '!highway=footway', '!highway=path'],
     type: 'way,relation',
     wayShape: 'line',
   };
@@ -211,10 +221,27 @@ async function main(): Promise<void> {
   });
   assert.equal(taggedUrls.length, 1);
   assert.equal(taggedUrls[0]?.pathname, '/v3/osm_features');
-  assert.deepEqual(taggedUrls[0]?.searchParams.getAll('tags') ?? [], ['highway']);
   assert.deepEqual(
-    taggedUrls[0]?.searchParams.getAll('not_tags') ?? [],
-    ['highway=footway', 'highway=path'],
+    taggedUrls[0]?.searchParams.getAll('tags') ?? [],
+    ['highway,!highway=footway,!highway=path'],
+  );
+
+  const andOrUrls: URL[] = [];
+  await osmFeatures.query(
+    {
+      bbox: buildingsLayer.bbox,
+      tags: ['amenity=cafe|amenity=bar', 'wheelchair=yes'],
+    },
+    {
+      fetchFn: async (input) => {
+        andOrUrls.push(toUrl(input));
+        return geojsonPage([]);
+      },
+    },
+  );
+  assert.deepEqual(
+    andOrUrls[0]?.searchParams.getAll('tags') ?? [],
+    ['amenity=cafe|amenity=bar,wheelchair=yes'],
   );
 
   const minAreaRequest = osmFeatures.resolveRequest({
@@ -445,7 +472,7 @@ async function main(): Promise<void> {
   );
   assert.equal(statsResolved.groupBy, 'amenity');
   assert.equal(statsResolved.within, 'relation/398021');
-  assert.deepEqual(statsResolved.tags, ['amenity', 'building']);
+  assert.equal(statsResolved.tags, 'amenity,building');
   assert.equal(statsResolved.limit, 20);
 
   const scalarResolved = osmFeatures.resolveCountRequest(
@@ -453,7 +480,11 @@ async function main(): Promise<void> {
   );
   assert.equal(scalarResolved.groupBy, undefined);
   assert.equal(scalarResolved.bbox, '18.06,59.32,18.09,59.34');
-  assert.deepEqual(scalarResolved.tags, ['amenity']);
+  assert.equal(scalarResolved.tags, 'amenity');
+  assert.throws(
+    () => osmFeatures.resolveCountRequest(new URLSearchParams('bbox=18.06,59.32,18.09,59.34&or_tags=amenity=cafe')),
+    (error: unknown) => (error as { code?: string }).code === 'invalid_tags',
+  );
 
   const statsUrls: URL[] = [];
   const statsOut = await osmFeatures.count(
@@ -518,7 +549,7 @@ async function main(): Promise<void> {
   );
   assert.equal(densityResolved.cellDeg, 0.1);
   assert.equal(densityResolved.bbox, '-26,33,52,72');
-  assert.deepEqual(densityResolved.tags, ['place']);
+  assert.equal(densityResolved.tags, 'place');
   assert.equal(densityResolved.disableBudgetWarning, true);
   assert.equal('groupBy' in densityResolved, false);
 
@@ -1057,7 +1088,7 @@ async function main(): Promise<void> {
     {
       location: { lat: 59.316, lon: 18.075 },
       radius: 500,
-      orTags: ['amenity=cafe'],
+      tags: ['amenity=cafe'],
       openNow: true,
       asOf: '2026-08-10T18:00:00+02:00',
       limit: 10,
@@ -1084,16 +1115,34 @@ async function main(): Promise<void> {
   assert.equal(searchUrl, '/v1/places/search');
   assert.deepEqual(searchPaths, ['/v1/places/search']);
   assert.deepEqual(searchBody?.['location'], { lat: 59.316, lng: 18.075 });
-  assert.deepEqual(searchBody?.['orTags'], ['amenity=cafe']);
+  assert.deepEqual(searchBody?.['tags'], ['amenity=cafe']);
   assert.equal(searchBody?.['openNow'], true);
   assert.equal(searchBody?.['asOf'], '2026-08-10T18:00:00+02:00');
   assert.equal(searchBody?.['limit'], 10);
+
+  let andSearchBody: Record<string, unknown> | undefined;
+  await osmFeatures.places_search(
+    {
+      bbox: '0,0,1,1',
+      tags: ['amenity=cafe|amenity=bar', '!cuisine'],
+    },
+    {
+      fetchFn: async (_input, init) => {
+        andSearchBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        return new Response(
+          JSON.stringify({ type: 'FeatureCollection', features: [] }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      },
+    },
+  );
+  assert.deepEqual(andSearchBody?.['tags'], ['amenity=cafe|amenity=bar', '!cuisine']);
 
   const tileBbox = '0,0,2,1';
   const placeTiles = splitBbox(tileBbox, 2);
   const placeTileBodies: Record<string, unknown>[] = [];
   const tiledPlaces = await freshClient().places_search(
-    { bbox: tileBbox, orTags: ['amenity=cafe'], bboxTiles: 2 },
+    { bbox: tileBbox, tags: ['amenity=cafe'], bboxTiles: 2 },
     {
       fetchFn: async (_input, init) => {
         const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
@@ -1124,7 +1173,7 @@ async function main(): Promise<void> {
   );
 
   const namelessPlaces = await freshClient().places_search(
-    { bbox: tileBbox, orTags: ['amenity=cafe'], bboxTiles: 2 },
+    { bbox: tileBbox, tags: ['amenity=cafe'], bboxTiles: 2 },
     {
       fetchFn: async () => new Response(JSON.stringify({
         type: 'FeatureCollection',
@@ -1138,7 +1187,7 @@ async function main(): Promise<void> {
     async () => freshClient().places_search({
       location: { lat: 59.3, lng: 18.0 },
       radius: 500,
-      orTags: ['amenity=cafe'],
+      tags: ['amenity=cafe'],
       autoSplit: true,
     }),
     (error: unknown) => {
@@ -1152,7 +1201,7 @@ async function main(): Promise<void> {
   const areaPaths: string[] = [];
   const areaSearchBboxes: string[] = [];
   const areaSplit = await freshClient().places_search(
-    { bbox: areaBbox, orTags: ['amenity=cafe'], autoSplit: true },
+    { bbox: areaBbox, tags: ['amenity=cafe'], autoSplit: true },
     {
       fetchFn: async (input, init) => {
         const url = toUrl(input);
@@ -1162,7 +1211,7 @@ async function main(): Promise<void> {
         }
         if (url.pathname === '/v2/osm_features/count') {
           assert.equal(url.searchParams.get('way_shape'), 'polygon');
-          assert.equal(url.searchParams.get('or_tags'), 'amenity=cafe');
+          assert.equal(url.searchParams.get('tags'), 'amenity=cafe');
           assert.equal(url.searchParams.get('type'), null);
           assert.equal(url.searchParams.get('group_by'), null);
           return statsTotal(1);
@@ -1197,7 +1246,7 @@ async function main(): Promise<void> {
   await freshClient().places_search(
     {
       bbox: '0,0,1,1',
-      orTags: ['amenity=cafe'],
+      tags: ['amenity=cafe'],
       asOf: '2026-08-10T18:00:00+02:00',
       autoSplit: true,
     },
@@ -1218,17 +1267,19 @@ async function main(): Promise<void> {
     },
   );
   assert.deepEqual(hoursPaths, ['/v2/osm_features/count', '/v1/places/search']);
-  assert.match(hoursCount, /tags=opening_hours/);
+  assert.deepEqual(
+    new URLSearchParams(hoursCount).getAll('tags'),
+    ['amenity=cafe,opening_hours'],
+  );
   assert.match(hoursCount, /way_shape=polygon/);
-  assert.match(hoursCount, /or_tags=amenity%3Dcafe/);
   assert.equal(hoursBody['asOf'], '2026-08-10T18:00:00+02:00');
-  assert.equal('tags' in hoursBody, false);
+  assert.deepEqual(hoursBody['tags'], ['amenity=cafe']);
 
   const openNowBbox = '0,0,1,1';
   const openNowTiles = splitBbox(openNowBbox, 2);
   const openNowSearch: string[] = [];
   const openNowSplit = await freshClient().places_search(
-    { bbox: openNowBbox, orTags: ['amenity=cafe'], openNow: true, limit: 10, autoSplit: true },
+    { bbox: openNowBbox, tags: ['amenity=cafe'], openNow: true, limit: 10, autoSplit: true },
     {
       fetchFn: async (input, init) => {
         const url = toUrl(input);
@@ -1255,7 +1306,7 @@ async function main(): Promise<void> {
   const placeCountUrls: URL[] = [];
   let placeSearchBody: Record<string, unknown> = {};
   await freshClient().places_search(
-    { bbox: '0,0,1,1', orTags: ['amenity=cafe'], autoSplit: true },
+    { bbox: '0,0,1,1', tags: ['amenity=cafe'], autoSplit: true },
     {
       fetchFn: async (input, init) => {
         const url = toUrl(input);
@@ -1266,7 +1317,7 @@ async function main(): Promise<void> {
         if (url.pathname === '/v2/osm_features/count') {
           assert.equal(url.searchParams.get('type'), null);
           assert.equal(url.searchParams.get('way_shape'), 'polygon');
-          assert.equal(url.searchParams.get('or_tags'), 'amenity=cafe');
+          assert.equal(url.searchParams.get('tags'), 'amenity=cafe');
           return statsTotal(1);
         }
         placeSearchBody = JSON.parse(String(init?.body)) as Record<string, unknown>;

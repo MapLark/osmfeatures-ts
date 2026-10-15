@@ -9,7 +9,7 @@
  *
  * Resolve
  *   resolvePresetFromQuery({ preset, bbox, zoom? })
- *   resolveCustomLayerFromQuery({ tags?/or_tags?/not_tags?, bbox })
+ *   resolveCustomLayerFromQuery({ tags, bbox })
  *   resolveLayerFromQuery(...) — preset if set, else custom tags
  *   bbox required — zoom optional (omit for full catalog detail)
  *

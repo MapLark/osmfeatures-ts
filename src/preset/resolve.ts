@@ -24,8 +24,6 @@ export type ResolvedPresetLayer = OSMFeaturesLayerPreset & { bbox: string };
 export type ResolvedCustomLayer = {
   bbox: string;
   tags?: string[];
-  orTags?: string[];
-  notTags?: string[];
   type?: string;
   wayShape?: 'line' | 'polygon' | 'all';
   /** @deprecated Use `wayShape`. */
@@ -133,26 +131,18 @@ export function resolvePresetFromQuery(query: PresetQuery): ResolvedPresetLayer 
 }
 
 /**
- * Custom layer: `tags` / `or_tags` / `not_tags` + required `bbox`.
- * Optional `type` / `way_shape`. Needs at least one positive filter (`tags` or `or_tags`).
+ * Custom layer: `tags` + required `bbox`. Optional `type` / `way_shape`.
+ * Needs at least one positive tag (`!key` alone is rejected).
  */
 export function resolveCustomLayerFromQuery(query: PresetQuery): ResolvedCustomLayer {
   const tags = stringList(query, 'tags');
-  const orTags = stringList(query, 'or_tags');
-  const notTags = stringList(query, 'not_tags');
-  if (tags.length === 0 && orTags.length === 0) {
-    throw appError(400, 'invalid_tags', 'tags or or_tags is required for a custom layer.');
+  if (tags.every((t) => t.startsWith('!'))) {
+    throw appError(400, 'invalid_tags', 'tags needs at least one positive filter for a custom layer.');
   }
 
   const layer: ResolvedCustomLayer = { bbox: requireBbox(query) };
   if (tags.length > 0) {
     layer.tags = tags;
-  }
-  if (orTags.length > 0) {
-    layer.orTags = orTags;
-  }
-  if (notTags.length > 0) {
-    layer.notTags = notTags;
   }
   const type = optionalString(query, 'type');
   if (type) {
@@ -166,7 +156,7 @@ export function resolveCustomLayerFromQuery(query: PresetQuery): ResolvedCustomL
 }
 
 /**
- * Demo / relay helper: `preset`+bbox, or custom `tags`/`or_tags`/`not_tags`+bbox.
+ * Demo / relay helper: `preset`+bbox, or custom `tags`+bbox.
  * Preset wins when both are present.
  */
 export function resolveLayerFromQuery(query: PresetQuery): ResolvedDemoLayer {

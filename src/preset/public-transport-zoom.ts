@@ -36,15 +36,13 @@ export function applyPublicTransportZoomPolicy<T extends OSMFeaturesLayerPreset>
     return preset;
   }
 
-  const orTags =
+  const clauses =
     zoom < PUBLIC_TRANSPORT_MAJOR_ZOOM
       ? PUBLIC_TRANSPORT_MAJOR_OR_TAGS
       : PUBLIC_TRANSPORT_MID_OR_TAGS;
 
   return {
     ...preset,
-    tags: undefined,
-    orTags: [...orTags],
-    notTags: preset.notTags,
+    tags: [clauses.join('|')],
   };
 }

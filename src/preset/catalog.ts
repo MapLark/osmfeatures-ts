@@ -14,13 +14,15 @@ export type OSMFeaturesLayerPreset = {
   id: OSMFeaturesPresetId;
   label: string;
   tags?: string[];
-  orTags?: string[];
-  notTags?: string[];
   type?: string;
   wayShape?: 'line' | 'polygon';
   /** @deprecated Use `wayShape`. */
   shape?: 'line' | 'polygon';
 };
+
+function orGroup(items: readonly string[]): string[] {
+  return [items.join('|')];
+}
 
 export const OSM_FEATURES_LAYER_PRESETS: Record<OSMFeaturesPresetId, OSMFeaturesLayerPreset> = {
   buildings: {
@@ -40,43 +42,43 @@ export const OSM_FEATURES_LAYER_PRESETS: Record<OSMFeaturesPresetId, OSMFeatures
   parks_green_space: {
     id: 'parks_green_space',
     label: 'Parks & green space',
-    orTags: [
+    tags: orGroup([
       'leisure=park',
       'leisure=garden',
       'landuse=grass',
       'landuse=forest',
       'natural=wood',
       'boundary=national_park',
-    ],
+    ]),
     type: 'way,relation',
   },
   food_dining: {
     id: 'food_dining',
     label: 'Food & dining',
-    orTags: [
+    tags: orGroup([
       'amenity=restaurant',
       'amenity=cafe',
       'amenity=fast_food',
       'amenity=bar',
       'amenity=pub',
       'amenity=biergarten',
-    ],
+    ]),
     wayShape: 'polygon',
   },
   shops_commerce: {
     id: 'shops_commerce',
     label: 'Shops & commerce',
-    orTags: [
+    tags: orGroup([
       'shop',
       'amenity=marketplace',
       'amenity=fuel',
       'office',
-    ],
+    ]),
   },
   public_transport: {
     id: 'public_transport',
     label: 'Public transport',
-    orTags: [
+    tags: orGroup([
       'highway=bus_stop',
       'railway=station',
       'railway=tram_stop',
@@ -95,12 +97,12 @@ export const OSM_FEATURES_LAYER_PRESETS: Record<OSMFeaturesPresetId, OSMFeatures
       'route=light_rail',
       'route=tram',
       'route=bus',
-    ],
+    ]),
   },
   leisure_sports: {
     id: 'leisure_sports',
     label: 'Leisure & sports',
-    orTags: [
+    tags: orGroup([
       'leisure=pitch',
       'leisure=sports_centre',
       'leisure=stadium',
@@ -108,12 +110,12 @@ export const OSM_FEATURES_LAYER_PRESETS: Record<OSMFeaturesPresetId, OSMFeatures
       'leisure=swimming_pool',
       'leisure=fitness_centre',
       'leisure=track',
-    ],
+    ]),
   },
   natural_features: {
     id: 'natural_features',
     label: 'Natural features',
-    orTags: [
+    tags: orGroup([
       'natural=water',
       'natural=wood',
       'natural=scrub',
@@ -122,19 +124,19 @@ export const OSM_FEATURES_LAYER_PRESETS: Record<OSMFeaturesPresetId, OSMFeatures
       'natural=cliff',
       'natural=saddle',
       'natural=beach',
-    ],
+    ]),
   },
   // OMT waterway classes: river / canal / stream / drain / ditch (no subclass).
   waterways: {
     id: 'waterways',
     label: 'Waterways',
-    orTags: [
+    tags: orGroup([
       'waterway=river',
       'waterway=canal',
       'waterway=stream',
       'waterway=drain',
       'waterway=ditch',
-    ],
+    ]),
     type: 'way,relation',
     wayShape: 'line',
   },

@@ -21,13 +21,11 @@ export function applyWaterwaysZoomPolicy<T extends OSMFeaturesLayerPreset>(
     return preset;
   }
 
-  const orTags =
+  const clauses =
     zoom < WATERWAYS_CANAL_ZOOM ? WATERWAYS_RIVER_OR_TAGS : WATERWAYS_RIVER_CANAL_OR_TAGS;
 
   return {
     ...preset,
-    tags: undefined,
-    orTags: [...orTags],
-    notTags: preset.notTags,
+    tags: [clauses.join('|')],
   };
 }

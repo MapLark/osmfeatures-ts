@@ -73,12 +73,34 @@ function metaFromHeaders(headers: Headers, featureCount: number): OSMFeaturesMet
   };
 }
 
+/**
+ * Tag filter. A list is ANDed: items are joined with `,` into one `tags` value.
+ * `|` inside an item is OR, and `a|(b,c)` groups an AND inside an OR. `!`
+ * prefixes one clause. Also `key!=value`, `key>n`, `key~regex`. Quote a value
+ * that contains `,`, `|` or `&` (`'name="Ben, Jerry\'s"'`). Regex cannot use an
+ * index, so AND it with an indexed tag.
+ */
+export type OSMFeaturesTags = string | string[];
+
+/** Normalize `tags` to non-empty items, in order. A bare string is one item. */
+export function tagValues(tags?: string | readonly string[] | null): string[] {
+  if (tags == null) return [];
+  return (typeof tags === 'string' ? [tags] : tags)
+    .map((t) => t.trim())
+    .filter((t) => t !== '');
+}
+
+/** One `tags` query value: items joined with `,` (AND), or undefined when empty. */
+export function tagValue(tags?: string | readonly string[] | null): string | undefined {
+  const items = tagValues(tags);
+  return items.length > 0 ? items.join(',') : undefined;
+}
+
 /** Layer filters from presets / custom resolve. Pass into `resolveRequest` or spread into `query`. */
 export type OSMFeaturesLayer = {
   bbox?: string;
-  tags?: string[];
-  orTags?: string[];
-  notTags?: string[];
+  /** List items AND; `|` inside one item is OR. See {@link OSMFeaturesTags}. */
+  tags?: OSMFeaturesTags;
   type?: string;
   wayShape?: 'line' | 'polygon' | 'all';
   /** @deprecated Use `wayShape`. */
@@ -135,9 +157,8 @@ export type OSMFeaturesCountParams = {
   wayShape?: 'line' | 'polygon' | 'all';
   /** @deprecated Use `wayShape`. */
   shape?: 'line' | 'polygon' | 'all';
-  tags?: string[];
-  orTags?: string[];
-  notTags?: string[];
+  /** Repeated values AND; `|` inside one value is OR. See {@link OSMFeaturesTags}. */
+  tags?: OSMFeaturesTags;
   /** Max histogram buckets (API default 100, max 10000). Does not cap the scan. */
   limit?: number;
   minLengthM?: number;
@@ -168,9 +189,8 @@ export type OSMFeaturesDensityParams = {
   wayShape?: 'line' | 'polygon' | 'all';
   /** @deprecated Use `wayShape`. */
   shape?: 'line' | 'polygon' | 'all';
-  tags?: string[];
-  orTags?: string[];
-  notTags?: string[];
+  /** Repeated values AND; `|` inside one value is OR. See {@link OSMFeaturesTags}. */
+  tags?: OSMFeaturesTags;
   /** Max occupied cells. Omit for the key's max_limit. */
   limit?: number;
   minLengthM?: number;
@@ -228,8 +248,8 @@ export type PlacesSearchParams = {
   bbox?: string;
   location?: LonLat;
   radius?: number;
-  tags?: string[];
-  orTags?: string[];
+  /** Repeated values AND; `|` inside one value is OR. See {@link OSMFeaturesTags}. */
+  tags?: OSMFeaturesTags;
   limit?: number;
   /** Keep only places known open at ``asOf`` (or now). Untagged hours are dropped. */
   openNow?: boolean;
@@ -247,8 +267,8 @@ export type PlacesSearchParams = {
 export type PlacesNearbyParams = {
   location: LonLat;
   radius?: number;
-  tags?: string[];
-  orTags?: string[];
+  /** Repeated values AND; `|` inside one value is OR. See {@link OSMFeaturesTags}. */
+  tags?: OSMFeaturesTags;
   limit?: number;
   /** Keep only places known open at ``asOf`` (or now). Untagged hours are dropped. */
   openNow?: boolean;
@@ -460,6 +480,15 @@ function asQueryMap(query: OSMFeaturesQuery | URLSearchParams): OSMFeaturesQuery
   return query instanceof URLSearchParams ? queryFromSearchParams(query) : query;
 }
 
+/** `or_tags` / `not_tags` were removed. Reject them so a filter never drops out silently. */
+function rejectLegacyTagParams(q: OSMFeaturesQuery): void {
+  for (const key of ['or_tags', 'not_tags']) {
+    if (q[key] != null && q[key] !== '') {
+      throw appError(400, 'invalid_tags', `${key} is no longer supported. Use tags: a|b for OR, !key for NOT.`);
+    }
+  }
+}
+
 function errorText(error: unknown): string {
   const err = error as AppError;
   return `${err.upstreamDetail ?? ''} ${err.message ?? ''} ${err.subtype ?? ''}`;
@@ -611,18 +640,14 @@ function assertExclusiveSpatial(params: {
   radius?: number;
   within?: string;
   osmIds?: string;
-  tags?: string[];
-  orTags?: string[];
-  notTags?: string[];
+  tags?: OSMFeaturesTags;
 }): void {
   const hasBbox = presentText(params.bbox);
   const hasLocation = presentText(params.location);
   const hasRadius = params.radius != null;
   const hasWithin = presentText(params.within);
   const hasOsmIds = presentText(params.osmIds);
-  const hasTags = (params.tags?.length ?? 0) > 0
-    || (params.orTags?.length ?? 0) > 0
-    || (params.notTags?.length ?? 0) > 0;
+  const hasTags = tagValues(params.tags).length > 0;
 
   if (hasLocation !== hasRadius) {
     throw appError(
@@ -901,9 +926,7 @@ type RawQueryParams = {
   wayShape?: string;
   /** @deprecated Use `wayShape`. */
   shape?: string;
-  tags?: string[];
-  orTags?: string[];
-  notTags?: string[];
+  tags?: OSMFeaturesTags;
 };
 
 function buildFeaturesQuery(params: RawQueryParams): URLSearchParams {
@@ -963,15 +986,8 @@ function buildFeaturesQuery(params: RawQueryParams): URLSearchParams {
   if (wayShape) {
     query.set('way_shape', wayShape);
   }
-  for (const tag of params.tags ?? []) {
-    query.append('tags', tag);
-  }
-  for (const tag of params.orTags ?? []) {
-    query.append('or_tags', tag);
-  }
-  for (const tag of params.notTags ?? []) {
-    query.append('not_tags', tag);
-  }
+  const tags = tagValue(params.tags);
+  if (tags) query.set('tags', tags);
   return query;
 }
 
@@ -1016,11 +1032,9 @@ function placesSearchBody(params: PlacesSearchParams): Record<string, unknown> {
   if (params.radius != null) {
     body['radius'] = params.radius;
   }
-  if (params.tags?.length) {
-    body['tags'] = params.tags;
-  }
-  if (params.orTags?.length) {
-    body['orTags'] = params.orTags;
+  const tags = tagValues(params.tags);
+  if (tags.length > 0) {
+    body['tags'] = tags;
   }
   if (params.limit != null) {
     body['limit'] = params.limit;
@@ -1041,11 +1055,9 @@ function placesNearbyBody(params: PlacesNearbyParams): Record<string, unknown> {
   if (params.radius != null) {
     body['radius'] = params.radius;
   }
-  if (params.tags?.length) {
-    body['tags'] = params.tags;
-  }
-  if (params.orTags?.length) {
-    body['orTags'] = params.orTags;
+  const nearbyTags = tagValues(params.tags);
+  if (nearbyTags.length > 0) {
+    body['tags'] = nearbyTags;
   }
   if (params.limit != null) {
     body['limit'] = params.limit;
@@ -1284,6 +1296,7 @@ export class OSMFeatures {
   /** Map Express/query params + resolved layer into flat `query` / `query_all` params. */
   resolveRequest(query: OSMFeaturesQuery | URLSearchParams, layer: OSMFeaturesLayer): OSMFeaturesParams {
     const q = asQueryMap(query);
+    rejectLegacyTagParams(q);
     const limit = optionalNumber(q, 'limit');
     const timeout = optionalTimeout(q);
     const bboxTilesRaw = optionalString(q, 'bbox_tiles') ?? optionalString(q, 'bboxTiles');
@@ -1308,8 +1321,6 @@ export class OSMFeatures {
     if (osmIds != null) {
       delete params.bbox;
       delete params.tags;
-      delete params.orTags;
-      delete params.notTags;
       params.osmIds = osmIds;
     } else if (within != null) {
       delete params.bbox;
@@ -1334,10 +1345,9 @@ export class OSMFeatures {
   /** Map Express/query params into `count` params. Omit `group_by` for a scalar total. */
   resolveCountRequest(query: OSMFeaturesQuery | URLSearchParams): OSMFeaturesCountParams {
     const q = asQueryMap(query);
+    rejectLegacyTagParams(q);
     const groupBy = optionalString(q, 'group_by');
-    const tags = stringList(q, 'tags');
-    const orTags = stringList(q, 'or_tags');
-    const notTags = stringList(q, 'not_tags');
+    const tags = tagValue(stringList(q, 'tags'));
     const wayShapeRaw = optionalString(q, 'way_shape') ?? optionalString(q, 'shape');
     const wayShape =
       wayShapeRaw === 'line' || wayShapeRaw === 'polygon' || wayShapeRaw === 'all'
@@ -1356,9 +1366,7 @@ export class OSMFeatures {
     const type = optionalString(q, 'type');
     if (type) params.type = type;
     if (wayShape) params.wayShape = wayShape;
-    if (tags.length > 0) params.tags = tags;
-    if (orTags.length > 0) params.orTags = orTags;
-    if (notTags.length > 0) params.notTags = notTags;
+    if (tags) params.tags = tags;
     const limit = optionalNumber(q, 'limit');
     if (limit != null && Number.isFinite(limit)) params.limit = Math.trunc(limit);
     const minLengthM = optionalNumber(q, 'min_length_m');
@@ -1377,9 +1385,8 @@ export class OSMFeatures {
   /** Map Express/query params into `density` params. Omit `cell_deg` for 0.1. */
   resolveDensityRequest(query: OSMFeaturesQuery | URLSearchParams): OSMFeaturesDensityParams {
     const q = asQueryMap(query);
-    const tags = stringList(q, 'tags');
-    const orTags = stringList(q, 'or_tags');
-    const notTags = stringList(q, 'not_tags');
+    rejectLegacyTagParams(q);
+    const tags = tagValue(stringList(q, 'tags'));
     const wayShapeRaw = optionalString(q, 'way_shape') ?? optionalString(q, 'shape');
     const wayShape =
       wayShapeRaw === 'line' || wayShapeRaw === 'polygon' || wayShapeRaw === 'all'
@@ -1399,9 +1406,7 @@ export class OSMFeatures {
     const type = optionalString(q, 'type');
     if (type) params.type = type;
     if (wayShape) params.wayShape = wayShape;
-    if (tags.length > 0) params.tags = tags;
-    if (orTags.length > 0) params.orTags = orTags;
-    if (notTags.length > 0) params.notTags = notTags;
+    if (tags) params.tags = tags;
     const limit = optionalNumber(q, 'limit');
     if (limit != null && Number.isFinite(limit)) params.limit = Math.trunc(limit);
     const minLengthM = optionalNumber(q, 'min_length_m');
@@ -1609,8 +1614,6 @@ export class OSMFeatures {
     const {
       bbox,
       tags,
-      orTags,
-      notTags,
       type,
       wayShape,
       shape,
@@ -1635,7 +1638,7 @@ export class OSMFeatures {
     } = params;
     const autoSplit = foldAutoSplit(autoSplitParam, splitUntilFit);
     assertExclusiveSpatial({
-      bbox, location, radius, within, osmIds, tags, orTags, notTags,
+      bbox, location, radius, within, osmIds, tags,
     });
     const tileLimit = resolveQueryLimit(limit);
     let apiTruncated = false;
@@ -1644,8 +1647,6 @@ export class OSMFeatures {
     const nowFn = dependencies.nowFn ?? Date.now;
     const filterParams: RawQueryParams = {
       tags,
-      orTags,
-      notTags,
       type,
       wayShape,
       shape,
@@ -1735,12 +1736,11 @@ export class OSMFeatures {
       return Array.isArray(raw.data.features) ? raw.data.features : [];
     };
 
+    const countTags = tagValue(tags);
     const matchCount = async (tile: string): Promise<number> => {
       const stat: OSMFeaturesCountParams = { bbox: tile };
       if (type != null) stat.type = type;
-      if (tags != null) stat.tags = tags;
-      if (orTags != null) stat.orTags = orTags;
-      if (notTags != null) stat.notTags = notTags;
+      if (countTags) stat.tags = countTags;
       if (minLengthM != null) stat.minLengthM = minLengthM;
       if (maxLengthM != null) stat.maxLengthM = maxLengthM;
       if (minAreaM2 != null) stat.minAreaM2 = minAreaM2;
@@ -1802,16 +1802,12 @@ export class OSMFeatures {
       radius: params.radius,
       within: params.within,
       tags: params.tags,
-      orTags: params.orTags,
-      notTags: params.notTags,
     });
     const { body, meta } = await this._getJson(
       '/v2/osm_features/count',
       buildFeaturesQuery({
         bbox: params.bbox,
         tags: params.tags,
-        orTags: params.orTags,
-        notTags: params.notTags,
         type: params.type,
         wayShape: params.wayShape ?? params.shape,
         limit: params.limit,
@@ -1845,16 +1841,12 @@ export class OSMFeatures {
       radius: params.radius,
       within: params.within,
       tags: params.tags,
-      orTags: params.orTags,
-      notTags: params.notTags,
     });
     const { body, meta } = await this._getJson(
       '/v2/osm_features/density',
       buildFeaturesQuery({
         bbox: params.bbox,
         tags: params.tags,
-        orTags: params.orTags,
-        notTags: params.notTags,
         type: params.type,
         wayShape: params.wayShape ?? params.shape,
         limit: params.limit,
@@ -1953,10 +1945,7 @@ export class OSMFeatures {
       throw new Error('autoSplit only applies to bbox search, not location+radius');
     }
     const hoursOn = Boolean(params.openNow || params.asOf != null);
-    const countTags = [...(params.tags ?? [])];
-    if (hoursOn) {
-      countTags.push('opening_hours');
-    }
+    const countTags = [...tagValues(params.tags), ...(hoursOn ? ['opening_hours'] : [])];
     let tileCap = 1;
     if (autoSplit && !hoursOn) {
       const tier = await this.account_tier({ fetchFn, sleepFn, nowFn });
@@ -1977,7 +1966,6 @@ export class OSMFeatures {
     const matchCount = async (tile: string): Promise<number> => {
       const stat: OSMFeaturesCountParams = { bbox: tile, wayShape: 'polygon' };
       if (countTags.length > 0) stat.tags = countTags;
-      if (params.orTags != null) stat.orTags = params.orTags;
       const body = await this.count(stat, { fetchFn, sleepFn, nowFn });
       if (typeof body.total !== 'number' || !Number.isFinite(body.total)) {
         throw new Error('count response must include total');

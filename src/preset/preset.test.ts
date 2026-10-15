@@ -65,6 +65,10 @@ const publicTransportMidOrTags = [
   'route=tram',
 ];
 
+function piped(items: readonly string[]): string[] {
+  return [items.join('|')];
+}
+
 function assertAppError(error: unknown, expected: { status: number; code: string; message: RegExp }): void {
   const appError = error as AppError;
   assert.equal(appError.status, expected.status);
@@ -119,17 +123,12 @@ async function main(): Promise<void> {
   );
 
   const major = applyRoadsPathsZoomPolicy(OSM_FEATURES_LAYER_PRESETS.roads_paths, 10.9);
-  assert.equal(major.tags, undefined);
-  assert.deepEqual(major.orTags, majorOrTags);
-  assert.equal(major.notTags, undefined);
+  assert.deepEqual(major.tags, piped(majorOrTags));
 
   const mid = applyRoadsPathsZoomPolicy(OSM_FEATURES_LAYER_PRESETS.roads_paths, 12.4);
-  assert.equal(mid.tags, undefined);
-  assert.deepEqual(mid.orTags, midOrTags);
-  assert.equal(mid.notTags, undefined);
+  assert.deepEqual(mid.tags, piped(midOrTags));
 
   const full = applyRoadsPathsZoomPolicy(OSM_FEATURES_LAYER_PRESETS.roads_paths, 13.5);
-  assert.equal(full.notTags, undefined);
   assert.deepEqual(full.tags, ['highway']);
 
   const resolvedMajor = resolvePresetFromQuery({
@@ -137,8 +136,7 @@ async function main(): Promise<void> {
     bbox: STOCKHOLM_BBOX,
     zoom: '10',
   });
-  assert.deepEqual(resolvedMajor.orTags, majorOrTags);
-  assert.equal(resolvedMajor.tags, undefined);
+  assert.deepEqual(resolvedMajor.tags, piped(majorOrTags));
   assert.equal(resolvedMajor.bbox, STOCKHOLM_BBOX);
 
   assert.deepEqual(
@@ -147,20 +145,20 @@ async function main(): Promise<void> {
   );
 
   const waterRiver = applyWaterwaysZoomPolicy(OSM_FEATURES_LAYER_PRESETS.waterways, 11);
-  assert.deepEqual(waterRiver.orTags, waterwaysRiverOrTags);
+  assert.deepEqual(waterRiver.tags, piped(waterwaysRiverOrTags));
 
   const waterCanal = applyWaterwaysZoomPolicy(OSM_FEATURES_LAYER_PRESETS.waterways, 12);
-  assert.deepEqual(waterCanal.orTags, waterwaysRiverCanalOrTags);
+  assert.deepEqual(waterCanal.tags, piped(waterwaysRiverCanalOrTags));
 
   const waterFull = applyWaterwaysZoomPolicy(OSM_FEATURES_LAYER_PRESETS.waterways, 13);
-  assert.deepEqual(waterFull.orTags, waterwaysFullOrTags);
+  assert.deepEqual(waterFull.tags, piped(waterwaysFullOrTags));
 
   const resolvedWater = resolvePresetFromQuery({
     preset: 'waterways',
     bbox: STOCKHOLM_BBOX,
     zoom: '11',
   });
-  assert.deepEqual(resolvedWater.orTags, waterwaysRiverOrTags);
+  assert.deepEqual(resolvedWater.tags, piped(waterwaysRiverOrTags));
   assert.equal(resolvedWater.wayShape, 'line');
 
   assert.deepEqual(
@@ -172,26 +170,26 @@ async function main(): Promise<void> {
     OSM_FEATURES_LAYER_PRESETS.public_transport,
     11,
   );
-  assert.deepEqual(transitMajor.orTags, publicTransportMajorOrTags);
+  assert.deepEqual(transitMajor.tags, piped(publicTransportMajorOrTags));
 
   const transitMid = applyPublicTransportZoomPolicy(
     OSM_FEATURES_LAYER_PRESETS.public_transport,
     12,
   );
-  assert.deepEqual(transitMid.orTags, publicTransportMidOrTags);
+  assert.deepEqual(transitMid.tags, piped(publicTransportMidOrTags));
 
   const transitFull = applyPublicTransportZoomPolicy(
     OSM_FEATURES_LAYER_PRESETS.public_transport,
     14,
   );
-  assert.deepEqual(transitFull.orTags, OSM_FEATURES_LAYER_PRESETS.public_transport.orTags);
+  assert.deepEqual(transitFull.tags, OSM_FEATURES_LAYER_PRESETS.public_transport.tags);
 
   const resolvedTransit = resolvePresetFromQuery({
     preset: 'public_transport',
     bbox: STOCKHOLM_BBOX,
     zoom: '11',
   });
-  assert.deepEqual(resolvedTransit.orTags, publicTransportMajorOrTags);
+  assert.deepEqual(resolvedTransit.tags, piped(publicTransportMajorOrTags));
 
   const speck = resolveBuildingsMinAreaM2('buildings', STOCKHOLM_BBOX, 11.5);
   assert.equal(typeof speck, 'number');
@@ -208,22 +206,18 @@ async function main(): Promise<void> {
   assert.deepEqual(
     resolveCustomLayerFromQuery({
       bbox: STOCKHOLM_BBOX,
-      tags: ['amenity=cafe'],
-      or_tags: ['amenity=restaurant', 'amenity=bar'],
-      not_tags: 'access=private',
+      tags: ['amenity=cafe', 'amenity=restaurant|amenity=bar', '!access=private'],
     }),
     {
       bbox: STOCKHOLM_BBOX,
-      tags: ['amenity=cafe'],
-      orTags: ['amenity=restaurant', 'amenity=bar'],
-      notTags: ['access=private'],
+      tags: ['amenity=cafe', 'amenity=restaurant|amenity=bar', '!access=private'],
     },
   );
 
   await assert.rejects(
-    async () => resolveCustomLayerFromQuery({ bbox: STOCKHOLM_BBOX, not_tags: ['building'] }),
+    async () => resolveCustomLayerFromQuery({ bbox: STOCKHOLM_BBOX, tags: ['!building'] }),
     (error: unknown) => {
-      assertAppError(error, { status: 400, code: 'invalid_tags', message: /tags or or_tags is required/ });
+      assertAppError(error, { status: 400, code: 'invalid_tags', message: /needs at least one positive filter/ });
       return true;
     },
   );

@@ -100,9 +100,7 @@ The feature tags to filter on.
 
 | Param     | Type       | Description                                                                      |
 | --------- | ---------- | -------------------------------------------------------------------------------- |
-| `tags`    | `string[]` | Tag filters that must all match (AND). Values like `building` or `amenity=cafe`. |
-| `orTags`  | `string[]` | Tag filters where any may match (OR).                                            |
-| `notTags` | `string[]` | Tag filters to exclude.                                                          |
+| `tags`    | `string \| string[]` | A list ANDs its items, sent as one `tags` value joined with `,`. `\|` inside one item is OR. `a\|(b,c)` is `a OR (b AND c)`. `!` prefixes one clause (`['amenity=cafe', 'wheelchair=yes\|!cuisine']`). Also `key!=value`, `key>n`, `key~regex`. Quote a value that contains `\|` or `&` (`name="Ben & Jerry's"`). Unquoted `&` is not an operator. Regex cannot use an index, so AND it with an indexed tag. |
 
 
 
@@ -203,7 +201,7 @@ const mix = await client.count({
 
 ## `density`
 
-Where features are dense, via `GET /v2/osm_features/density`. Returns a GeoJSON FeatureCollection of occupied grid points (`properties.count`) plus `total` and `truncated`. Not OSM features. Omit `cellDeg` for 0.1. `type` omitted is nodes. `tags` or `orTags` is required. `limit` is max occupied cells. Map query strings with `resolveDensityRequest`.
+Where features are dense, via `GET /v2/osm_features/density`. Returns a GeoJSON FeatureCollection of occupied grid points (`properties.count`) plus `total` and `truncated`. Not OSM features. Omit `cellDeg` for 0.1. `type` omitted is nodes. `tags` is required. `limit` is max occupied cells. Map query strings with `resolveDensityRequest`.
 
 A Europe box (`-26,33,52,72`) fits the density area cap and needs `disableBudgetWarning: true` when the per-request unit cap 400s. Count of that box still 400s on area. A unit-cap 400 on count can pass the same flag.
 
@@ -234,7 +232,7 @@ Unset fields are omitted so server defaults apply (`places_search` limit 100, `p
 
 ### Places search
 
-`places_search()` looks up POIs inside a bounding box **or** around `{ lat, lon }` + `radius` (pick one). `tags` is AND; `orTags` is OR; both use the same OSM keys as `query()`. Leave `limit` off for the API default (100, max 10_000).
+`places_search()` looks up POIs inside a bounding box **or** around `{ lat, lon }` + `radius` (pick one). A `tags` list is ANDed and sent as one comma-joined value; `|` inside one item is OR (`['amenity=cafe', 'wheelchair=yes|!cuisine']`). Leave `limit` off for the API default (100, max 10_000).
 
 `bboxTiles` and `autoSplit` only apply to bbox search (same walk as `query`). `autoSplit` counts with `way_shape=polygon`, then fetches. No hours: split on `total` vs the key's `max_limit`. With `asOf` / `openNow`, the count ANDs `opening_hours`. An `asOf` page `limit` truncates; density-split vs the 10k parse cap only when `limit` is raised above 10k. `openNow` density-splits vs that 10k scan cap even with a small fill limit. After tiling, `metadata.units` is the sum of the tiles. location+radius cannot split. To tile a radius window, convert it first with `around_to_bbox` (a square that contains the circle; corner hits can fall outside the original radius):
 
@@ -242,7 +240,7 @@ Unset fields are omitted so server defaults apply (`places_search` limit 100, `p
 import { around_to_bbox } from 'osmfeatures';
 
 const bbox = around_to_bbox(18.075, 59.316, 800);
-const cafes = await client.places_search({ bbox, orTags: ['amenity=cafe'], autoSplit: true });
+const cafes = await client.places_search({ bbox, tags: ['amenity=cafe'], autoSplit: true });
 ```
 
 ```ts
@@ -251,7 +249,7 @@ const origin = { lat: 59.316, lon: 18.075 };
 const cafes = await client.places_search({
   location: origin,
   radius: 800,
-  orTags: ['amenity=cafe'],
+  tags: ['amenity=cafe'],
   openNow: true,
   asOf: '2026-08-10T18:00:00+02:00',
 });
@@ -259,12 +257,12 @@ const cafes = await client.places_search({
 
 ### Nearby (ranked from a point)
 
-`places_nearby()` is “what is closest to this coordinate?”. You must pass `tags` or `orTags`. Hits are ordered by straight-line spheroid distance. Defaults if omitted: 1000 m radius, 100 results.
+`places_nearby()` is “what is closest to this coordinate?”. You must pass `tags`. Hits are ordered by straight-line spheroid distance. Defaults if omitted: 1000 m radius, 100 results.
 
 ```ts
 const nearby = await client.places_nearby({
   location: origin,
-  orTags: ['amenity=cafe'],
+  tags: ['amenity=cafe'],
   limit: 5,
   openNow: true,
   asOf: '2026-08-10T18:00:00+02:00',
@@ -302,8 +300,8 @@ Timezone is inferred from coordinates (IANA). There is no `timezone` request fie
 import { nearest_within } from 'osmfeatures';
 
 const bbox = '18.05,59.33,18.10,59.36';
-const restaurants = await client.places_search({ bbox, orTags: ['amenity=restaurant'] });
-const stations = await client.places_search({ bbox, orTags: ['railway=station'] });
+const restaurants = await client.places_search({ bbox, tags: ['amenity=restaurant'] });
+const stations = await client.places_search({ bbox, tags: ['railway=station'] });
 const pairs = nearest_within(restaurants, stations, 150, { limit: 20 });
 
 for (const pair of pairs) {

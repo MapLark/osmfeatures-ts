@@ -36,13 +36,11 @@ export function applyRoadsPathsZoomPolicy<T extends OSMFeaturesLayerPreset>(
     return preset;
   }
 
-  const orTags =
+  const clauses =
     zoom < ROADS_PATHS_MAJOR_ZOOM ? ROADS_PATHS_MAJOR_OR_TAGS : ROADS_PATHS_MID_OR_TAGS;
 
   return {
     ...preset,
-    tags: undefined,
-    orTags: [...orTags],
-    notTags: preset.notTags,
+    tags: [clauses.join('|')],
   };
 }
